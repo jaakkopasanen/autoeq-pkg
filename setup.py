@@ -13,13 +13,13 @@ setup(
     description='Tool for equalizing headphones',
     platforms=['any'],
     keywords=['mongodb', 'mongoengine'],
-    requires=[
+    install_requires=[
         'Pillow',
         'matplotlib',
         'pandas',
         'scipy',
         'numpy',
-        'tensorflow>=1.12.1',
+        'tensorflow(>=1.12.1)',
         'tabulate',
         'gevent',
         'soundfile'
