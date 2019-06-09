@@ -19,7 +19,7 @@ from time import time
 from tabulate import tabulate
 from PIL import Image
 import re
-import biquad
+from autoeq import biquad
 import warnings
 
 ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
