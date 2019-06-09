@@ -19,7 +19,7 @@ from time import time
 from tabulate import tabulate
 from PIL import Image
 import re
-from autoeq import biquad
+import biquad
 import warnings
 
 ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
@@ -32,10 +32,14 @@ DEFAULT_TREBLE_F_LOWER = 6000.0
 DEFAULT_TREBLE_F_UPPER = 8000.0
 DEFAULT_TREBLE_MAX_GAIN = 0.0
 DEFAULT_TREBLE_GAIN_K = 1.0
-DEFAULT_SMOOTHING_WINDOW_SIZE = 1 / 5
-DEFAULT_SMOOTHING_ITERATIONS = 10
-DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE = 1 / 5
-DEFAULT_TREBLE_SMOOTHING_ITERATIONS = 100
+
+DEFAULT_SMOOTHING_METHOD = 'max'
+DEFAULT_SMOOTHING_WINDOW_SIZE = 1 / 6
+DEFAULT_SMOOTHING_ITERATIONS = 1
+DEFAULT_TREBLE_SMOOTHING_F_LOWER = 100.0
+DEFAULT_TREBLE_SMOOTHING_F_UPPER = 10000.0
+DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE = 1 / 3
+DEFAULT_TREBLE_SMOOTHING_ITERATIONS = 1
 DEFAULT_TILT = 0.0
 DEFAULT_FS = 44100
 DEFAULT_BIT_DEPTH = 16
@@ -81,6 +85,22 @@ class FrequencyResponse:
         self.equalized_smoothed = self._init_data(equalized_smoothed)
         self.target = self._init_data(target)
         self._sort()
+
+    def copy(self, name=None):
+        return FrequencyResponse(
+            name=self.name + '_copy' if name is None else name,
+            frequency=self._init_data(self.frequency),
+            raw=self._init_data(self.raw),
+            error=self._init_data(self.error),
+            smoothed=self._init_data(self.smoothed),
+            error_smoothed=self._init_data(self.error_smoothed),
+            equalization=self._init_data(self.equalization),
+            parametric_eq=self._init_data(self.parametric_eq),
+            fixed_band_eq=self._init_data(self.fixed_band_eq),
+            equalized_raw=self._init_data(self.equalized_raw),
+            equalized_smoothed=self._init_data(self.equalized_smoothed),
+            target=self._init_data(self.target)
+        )
 
     @staticmethod
     def _init_data(data):
@@ -131,19 +151,31 @@ class FrequencyResponse:
               equalized_smoothed=True,
               target=True):
         """Resets data."""
-        if (
-                (raw and len(self.raw)) or
-                (smoothed and len(self.smoothed)) or
-                (error and len(self.error)) or
-                (error_smoothed and len(self.error_smoothed)) or
-                (equalization and len(self.equalization)) or
-                (parametric_eq and len(self.parametric_eq)) or
-                (fixed_band_eq and len(self.fixed_band_eq)) or
-                (equalized_raw and len(self.equalized_raw)) or
-                (equalized_smoothed and len(self.equalized_smoothed)) or
-                (target and len(self.target))
-        ):
-            warn('Resetting data, existing results will be affected!')
+        reset_data = []
+        if raw and len(self.raw):
+            reset_data.append('raw')
+        if smoothed and len(self.smoothed):
+            reset_data.append('smoothed')
+        if error and len(self.error):
+            reset_data.append('error')
+        if error_smoothed and len(self.error_smoothed):
+            reset_data.append('error_smoothed')
+        if equalization and len(self.equalization):
+            reset_data.append('equalization')
+        if parametric_eq and len(self.parametric_eq):
+            reset_data.append('parametric_eq')
+        if fixed_band_eq and len(self.fixed_band_eq):
+            reset_data.append('fixed_band_eq')
+        if equalized_raw and len(self.equalized_raw):
+            reset_data.append('equalized_raw')
+        if equalized_smoothed and len(self.equalized_smoothed):
+            reset_data.append('equalized_smoothed')
+        if target and len(self.target):
+            reset_data.append('target')
+        if len(reset_data):
+            warn('Resetting data of "{}". These need to be regenerated if they are still needed!'.format(
+                '", "'.join(reset_data)
+            ))
         if raw:
             self.raw = self._init_data(None)
         if smoothed:
@@ -180,8 +212,9 @@ class FrequencyResponse:
             ))
         frequency = list(df['frequency'])
         raw = list(df['raw']) if 'raw' in df else None
-        error = list(df['error']) if 'error' in df else None
         smoothed = list(df['smoothed']) if 'smoothed' in df else None
+        error = list(df['error']) if 'error' in df else None
+        error_smoothed = list(df['error_smoothed']) if 'error_smoothed' in df else None
         equalization = list(df['equalization']) if 'equalization' in df else None
         parametric_eq = list(df['parametric_eq']) if 'parametric_eq' in df else None
         equalized_raw = list(df['equalized_raw']) if 'equalized_raw' in df else None
@@ -193,8 +226,9 @@ class FrequencyResponse:
             name=name,
             frequency=frequency,
             raw=raw,
-            error=error,
             smoothed=smoothed,
+            error=error,
+            error_smoothed=error_smoothed,
             equalization=equalization,
             parametric_eq=parametric_eq,
             equalized_raw=equalized_raw,
@@ -234,16 +268,17 @@ class FrequencyResponse:
         df = pd.DataFrame(self.to_dict())
         df.to_csv(file_path, header=True, index=False, float_format='%.2f')
 
-    def write_eqapo_graphic_eq(self, file_path):
+    def write_eqapo_graphic_eq(self, file_path, normalize=True):
         """Writes equalization graph to a file as Equalizer APO config."""
         file_path = os.path.abspath(file_path)
 
         fr = FrequencyResponse(name='hack', frequency=self.frequency, raw=self.equalization)
         fr.interpolate(f_min=DEFAULT_F_MIN, f_max=DEFAULT_F_MAX, f_step=GRAPHIC_EQ_STEP)
-        fr.raw -= np.max(fr.raw) + 0.5
-        if fr.raw[0] > 0.0:
-            # Prevent bass boost below lowest frequency
-            fr.raw[0] = 0.0
+        if normalize:
+            fr.raw -= np.max(fr.raw) + 0.5
+            if fr.raw[0] > 0.0:
+                # Prevent bass boost below lowest frequency
+                fr.raw[0] = 0.0
 
         # Remove leading zeros
         while np.abs(fr.raw[-1]) < 0.1 and np.abs(fr.raw[-2]) < 0.1:  # Last two are zeros
@@ -276,7 +311,7 @@ class FrequencyResponse:
 
         # Smoothen heavily
         fr_target = FrequencyResponse(name='Filter Initialization', frequency=frequency, raw=target)
-        fr_target.smoothen(window_size=1 / 7, iterations=1000)
+        fr_target.smoothen_fractional_octave(window_size=1 / 7, iterations=1000)
 
         # Equalization target
         eq_target = tf.constant(target, name='eq_target', dtype='float32')
@@ -677,7 +712,7 @@ class FrequencyResponse:
         folders.reverse()
         return folders
 
-    def minimum_phase_impulse_response(self, fs=DEFAULT_FS, f_res=DEFAULT_F_RES):
+    def minimum_phase_impulse_response(self, fs=DEFAULT_FS, f_res=DEFAULT_F_RES, normalize=True):
         """Generates minimum phase impulse response
 
         Inspired by:
@@ -685,6 +720,8 @@ class FrequencyResponse:
 
         Args:
             fs: Sampling frequency in Hz
+            f_res: Frequency resolution as sampling interval. 20 would result in sampling at 0 Hz, 20 Hz, 40 Hz, ...
+            normalize: Normalize gain to -0.5 dB
 
         Returns:
             Minimum phase impulse response
@@ -692,13 +729,19 @@ class FrequencyResponse:
         # Double frequency resolution because it will be halved when converting linear phase IR to minimum phase
         f_res /= 2
         # Interpolate to even sample interval
-        fr = FrequencyResponse(name='fr_data', frequency=self.frequency, raw=self.equalization)
-        fr.interpolate(np.arange(0, fs // 2, f_res))
-        n = len(fr.frequency)
-        fr.raw[fr.frequency < f_res] = 0.0
-        # Reduce by max gain to avoid clipping with 1 dB of headroom
-        fr.raw -= np.max(fr.raw)
-        fr.raw -= 0.5
+        fr = FrequencyResponse(name='fr_data', frequency=self.frequency.copy(), raw=self.equalization.copy())
+        # Save gain at lowest available frequency
+        f_min = np.max([fr.frequency[0], f_res])
+        interpolator = InterpolatedUnivariateSpline(np.log10(fr.frequency), fr.raw, k=1)
+        gain_f_min = interpolator(np.log10(f_min))
+        # Run interpolation
+        fr.interpolate(np.arange(0, fs // 2, f_res), pol_order=1)
+        # Set gain for all frequencies below original minimum frequency to match gain at the original minimum frequency
+        fr.raw[fr.frequency <= f_min] = gain_f_min
+        if normalize:
+            # Reduce by max gain to avoid clipping with 1 dB of headroom
+            fr.raw -= np.max(fr.raw)
+            fr.raw -= 0.5
         # Minimum phase transformation halves dB gain
         # Maybe because it's only half long filter?
         fr.raw *= 2
@@ -707,27 +750,33 @@ class FrequencyResponse:
         # Calculate response
         fr.frequency = np.append(fr.frequency, fs // 2)
         fr.raw = np.append(fr.raw, 0.0)
-        ir = firwin2(n * 2, fr.frequency, fr.raw, fs=fs)
+        ir = firwin2(len(fr.frequency) * 2, fr.frequency, fr.raw, fs=fs)
         # Convert to minimum phase
         ir = minimum_phase(ir)
         return ir
 
-    def linear_phase_impulse_response(self, fs=DEFAULT_FS, f_res=DEFAULT_F_RES):
+    def linear_phase_impulse_response(self, fs=DEFAULT_FS, f_res=DEFAULT_F_RES, normalize=True):
         """Generates impulse response implementation of equalization filter."""
         # Interpolate to even sample interval
         fr = FrequencyResponse(name='fr_data', frequency=self.frequency, raw=self.equalization)
+        # Save gain at lowest available frequency
+        f_min = np.max([fr.frequency[0], f_res])
+        interpolator = InterpolatedUnivariateSpline(np.log10(fr.frequency), fr.raw, k=1)
+        gain_f_min = interpolator(np.log10(f_min))
+        # Run interpolation
         fr.interpolate(np.arange(0, fs // 2, f_res))
-        n = len(fr.frequency)
-        fr.raw[fr.frequency < f_res] = 0.0
-        # Reduce by max gain to avoid clipping with 1 dB of headroom
-        fr.raw -= np.max(fr.raw)
-        fr.raw -= 0.5
+        # Set gain for all frequencies below original minimum frequency to match gain at the original minimum frequency
+        fr.raw[fr.frequency <= f_min] = gain_f_min
+        if normalize:
+            # Reduce by max gain to avoid clipping with 1 dB of headroom
+            fr.raw -= np.max(fr.raw)
+            fr.raw -= 0.5
         # Convert amplitude to linear scale
         fr.raw = 10 ** (fr.raw / 20)
         # Calculate response
         fr.frequency = np.append(fr.frequency, fs // 2)
         fr.raw = np.append(fr.raw, 0.0)
-        ir = firwin2(n * 2, fr.frequency, fr.raw, fs=fs)
+        ir = firwin2(len(fr.frequency) * 2, fr.frequency, fr.raw, fs=fs)
         return ir
 
     def write_readme(self,
@@ -983,7 +1032,7 @@ class FrequencyResponse:
         """Sets target and error curves."""
         # Copy and center compensation data
         compensation = FrequencyResponse(name='compensation', frequency=compensation.frequency, raw=compensation.raw)
-        compensation.smoothen(
+        compensation.smoothen_fractional_octave(
             window_size=DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
             iterations=DEFAULT_TREBLE_SMOOTHING_ITERATIONS
         )
@@ -1055,14 +1104,14 @@ class FrequencyResponse:
         a = a * -(a_normal - a_treble) + a_normal
         return a
 
-    def _smoothen_data(self,
-                       data,
-                       window_size=DEFAULT_SMOOTHING_WINDOW_SIZE,
-                       iterations=DEFAULT_SMOOTHING_ITERATIONS,
-                       treble_window_size=None,
-                       treble_iterations=None,
-                       treble_f_lower=DEFAULT_TREBLE_F_LOWER,
-                       treble_f_upper=DEFAULT_TREBLE_F_UPPER):
+    def _smoothen_fractional_octave(self,
+                                    data,
+                                    window_size=DEFAULT_SMOOTHING_WINDOW_SIZE,
+                                    iterations=DEFAULT_SMOOTHING_ITERATIONS,
+                                    treble_window_size=None,
+                                    treble_iterations=None,
+                                    treble_f_lower=DEFAULT_TREBLE_SMOOTHING_F_LOWER,
+                                    treble_f_upper=DEFAULT_TREBLE_SMOOTHING_F_UPPER):
         """Smooths data.
 
         Args:
@@ -1085,7 +1134,7 @@ class FrequencyResponse:
             # Savgol filter uses array indexing which is not future proof, ignoring the warning and trusting that this
             # will be fixed in the future release
             warnings.simplefilter("ignore")
-            for _ in range(iterations):
+            for i in range(iterations):
                 y_normal = savgol_filter(y_normal, self._window_size(window_size), 2)
 
             # Treble filter
@@ -1098,13 +1147,14 @@ class FrequencyResponse:
         k_normal = k_treble * -1 + 1
         return y_normal * k_normal + y_treble * k_treble
 
-    def smoothen(self,
-                 window_size=DEFAULT_SMOOTHING_WINDOW_SIZE,
-                 iterations=DEFAULT_SMOOTHING_ITERATIONS,
-                 treble_window_size=None,
-                 treble_iterations=None,
-                 treble_f_lower=DEFAULT_TREBLE_F_LOWER,
-                 treble_f_upper=DEFAULT_TREBLE_F_UPPER):
+    def smoothen_fractional_octave(self,
+                                   method='max',
+                                   window_size=DEFAULT_SMOOTHING_WINDOW_SIZE,
+                                   iterations=DEFAULT_SMOOTHING_ITERATIONS,
+                                   treble_window_size=DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
+                                   treble_iterations=DEFAULT_TREBLE_SMOOTHING_ITERATIONS,
+                                   treble_f_lower=DEFAULT_TREBLE_SMOOTHING_F_LOWER,
+                                   treble_f_upper=DEFAULT_TREBLE_SMOOTHING_F_UPPER):
         """Smooths data.
 
         Args:
@@ -1120,14 +1170,8 @@ class FrequencyResponse:
         if treble_f_upper <= treble_f_lower:
             raise ValueError('Upper transition boundary must be greater than lower boundary')
 
-        # Use normal filter parameters for treble filter if treble filter parameters are not given
-        if treble_window_size is None:
-            treble_window_size = window_size
-        if treble_iterations is None:
-            treble_iterations = iterations
-
         # Smoothen raw data
-        self.smoothed = self._smoothen_data(
+        self.smoothed = self._smoothen_fractional_octave(
             self.raw,
             window_size=window_size,
             iterations=iterations,
@@ -1139,7 +1183,7 @@ class FrequencyResponse:
 
         if len(self.error):
             # Smoothen error data
-            self.error_smoothed = self._smoothen_data(
+            self.error_smoothed = self._smoothen_fractional_octave(
                 self.error,
                 window_size=window_size,
                 iterations=iterations,
@@ -1148,6 +1192,63 @@ class FrequencyResponse:
                 treble_f_lower=treble_f_lower,
                 treble_f_upper=treble_f_upper
             )
+
+        # Equalization is affected by smoothing, reset equalization results
+        self.reset(
+            raw=False,
+            smoothed=False,
+            error=False,
+            error_smoothed=False,
+            equalization=True,
+            parametric_eq=True,
+            fixed_band_eq=True,
+            equalized_raw=True,
+            equalized_smoothed=True,
+            target=False
+        )
+
+    def smoothen_heavy_light(self):
+        """Smoothens data by combining light and heavy smoothing and taking maximum.
+
+        Returns:
+            None
+        """
+        light = self.copy()
+        light.name = 'Light'
+        light.smoothen_fractional_octave(
+            window_size=1 / 6,
+            iterations=1,
+            treble_f_lower=100,
+            treble_f_upper=10000,
+            treble_window_size=1 / 3,
+            treble_iterations=1
+        )
+
+        heavy = self.copy()
+        heavy.name = 'Heavy'
+        heavy.smoothen_fractional_octave(
+            window_size=1 / 3,
+            iterations=1,
+            treble_f_lower=1000,
+            treble_f_upper=6000,
+            treble_window_size=1.3,
+            treble_iterations=1
+        )
+
+        combination = self.copy()
+        combination.name = 'Combination'
+        combination.error = np.max(np.vstack([light.error_smoothed, heavy.error_smoothed]), axis=0)
+        combination.smoothen_fractional_octave(
+            window_size=1 / 3,
+            iterations=1,
+            treble_f_lower=100,
+            treble_f_upper=10000,
+            treble_window_size=1 / 3,
+            treble_iterations=1
+        )
+
+        self.smoothed = combination.smoothed.copy()
+        self.error_smoothed = combination.error_smoothed.copy()
 
         # Equalization is affected by smoothing, reset equalization results
         self.reset(
@@ -1261,53 +1362,54 @@ class FrequencyResponse:
                    a_min=None,
                    a_max=None,
                    color='black',
-                   close=True):
+                   close=False):
         """Plots frequency response graph."""
         if fig is None:
             fig, ax = plt.subplots()
+            fig.set_size_inches(12, 8)
         legend = []
         if not len(self.frequency):
             raise ValueError('\'frequency\' has no data!')
         if target and len(self.target):
-            plt.plot(self.frequency, self.target, linewidth=5, color='lightblue')
+            ax.plot(self.frequency, self.target, linewidth=5, color='lightblue')
             legend.append('Target')
         if smoothed and len(self.smoothed):
-            plt.plot(self.frequency, self.smoothed, linewidth=5, color='lightgrey')
+            ax.plot(self.frequency, self.smoothed, linewidth=5, color='lightgrey')
             legend.append('Raw Smoothed')
         if error_smoothed and len(self.error_smoothed):
-            plt.plot(self.frequency, self.error_smoothed, linewidth=5, color='pink')
+            ax.plot(self.frequency, self.error_smoothed, linewidth=5, color='pink')
             legend.append('Error Smoothed')
         if raw and len(self.raw):
-            plt.plot(self.frequency, self.raw, linewidth=1, color=color)
+            ax.plot(self.frequency, self.raw, linewidth=1, color=color)
             legend.append('Raw')
         if error and len(self.error):
-            plt.plot(self.frequency, self.error, linewidth=1, color='red')
+            ax.plot(self.frequency, self.error, linewidth=1, color='red')
             legend.append('Error')
         if parametric_eq and len(self.parametric_eq):
-            plt.plot(self.frequency, self.parametric_eq, linewidth=5, color='lightgreen')
+            ax.plot(self.frequency, self.parametric_eq, linewidth=5, color='lightgreen')
             legend.append('Parametric Eq')
         if fixed_band_eq and len(self.fixed_band_eq):
-            plt.plot(self.frequency, self.fixed_band_eq, linewidth=5, color='limegreen')
+            ax.plot(self.frequency, self.fixed_band_eq, linewidth=5, color='limegreen')
             legend.append('Fixed Band Eq')
         if equalization and len(self.equalization):
-            plt.plot(self.frequency, self.equalization, linewidth=1, color='darkgreen')
+            ax.plot(self.frequency, self.equalization, linewidth=1, color='darkgreen')
             legend.append('Equalization')
         if equalized and len(self.equalized_raw) and not len(self.equalized_smoothed):
-            plt.plot(self.frequency, self.equalized_raw, linewidth=1, color='magenta')
+            ax.plot(self.frequency, self.equalized_raw, linewidth=1, color='magenta')
             legend.append('Equalized raw')
         if equalized and len(self.equalized_smoothed):
-            plt.plot(self.frequency, self.equalized_smoothed, linewidth=1, color='blue')
+            ax.plot(self.frequency, self.equalized_smoothed, linewidth=1, color='blue')
             legend.append('Equalized smoothed')
 
-        plt.xlabel('Frequency (Hz)')
-        plt.semilogx()
-        plt.xlim([f_min, f_max])
-        plt.ylabel('Amplitude (dBr)')
-        plt.ylim([a_min, a_max])
-        plt.title(self.name)
-        plt.legend(legend, fontsize=8)
-        plt.grid(True, which='major')
-        plt.grid(True, which='minor')
+        ax.set_xlabel('Frequency (Hz)')
+        ax.semilogx()
+        ax.set_xlim([f_min, f_max])
+        ax.set_ylabel('Amplitude (dBr)')
+        ax.set_ylim([a_min, a_max])
+        ax.set_title(self.name)
+        ax.legend(legend, fontsize=8)
+        ax.grid(True, which='major')
+        ax.grid(True, which='minor')
         ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
         if file_path is not None:
             file_path = os.path.abspath(file_path)
@@ -1316,9 +1418,9 @@ class FrequencyResponse:
             im = im.convert('P', palette=Image.ADAPTIVE, colors=60)
             im.save(file_path, optimize=True)
         if show:
-            plt.show()
+            plt.show(fig)
         elif close:
-            plt.close()
+            plt.close(fig)
         return fig, ax
 
     def process(self,
@@ -1420,14 +1522,7 @@ class FrequencyResponse:
             )
 
         # Smooth data
-        self.smoothen(
-            window_size=DEFAULT_SMOOTHING_WINDOW_SIZE,
-            iterations=DEFAULT_SMOOTHING_ITERATIONS,
-            treble_window_size=DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-            treble_iterations=DEFAULT_TREBLE_SMOOTHING_ITERATIONS,
-            treble_f_lower=treble_f_lower,
-            treble_f_upper=treble_f_upper
-        )
+        self.smoothen_heavy_light()
 
         peq_filters = n_peq_filters = peq_max_gains = fbeq_filters = n_fbeq_filters = nfbeq_max_gains = None
         # Equalize
@@ -1558,7 +1653,7 @@ class FrequencyResponse:
 
                 if equalize:
                     # Write EqualizerAPO GraphicEq settings to file
-                    fr.write_eqapo_graphic_eq(output_file_path.replace('.csv', ' GraphicEQ.txt'))
+                    fr.write_eqapo_graphic_eq(output_file_path.replace('.csv', ' GraphicEQ.txt'), normalize=True)
                     if parametric_eq:
                         # Write ParametricEq settings to file
                         fr.write_eqapo_parametric_eq(output_file_path.replace('.csv', ' ParametricEQ.txt'), peq_filters)
@@ -1573,7 +1668,7 @@ class FrequencyResponse:
                     for _fs in fss:
                         if phase in ['linear', 'both']:
                             # Write linear phase impulse response
-                            linear_phase_ir = fr.linear_phase_impulse_response(fs=_fs, f_res=f_res)
+                            linear_phase_ir = fr.linear_phase_impulse_response(fs=_fs, f_res=f_res, normalize=True)
                             linear_phase_ir = np.tile(linear_phase_ir, (2, 1)).T
                             sf.write(
                                 output_file_path.replace('.csv', ' linear phase {}Hz.wav'.format(_fs)),
@@ -1583,7 +1678,7 @@ class FrequencyResponse:
                             )
                         if phase in ['minimum', 'both']:
                             # Write minimum phase impulse response
-                            minimum_phase_ir = fr.minimum_phase_impulse_response(fs=_fs, f_res=f_res)
+                            minimum_phase_ir = fr.minimum_phase_impulse_response(fs=_fs, f_res=f_res, normalize=True)
                             minimum_phase_ir = np.tile(minimum_phase_ir, (2, 1)).T
                             sf.write(
                                 output_file_path.replace('.csv', ' minimum phase {}Hz.wav'.format(_fs)),
@@ -1594,12 +1689,13 @@ class FrequencyResponse:
 
                 # Write results to CSV file
                 fr.write_to_csv(output_file_path)
+
                 # Write plots to file and optionally display them
-                fig, ax = fr.plot_graph(
+                fr.plot_graph(
                     show=show_plot,
+                    close=not show_plot,
                     file_path=output_file_path.replace('.csv', '.png'),
                 )
-                plt.close(fig)
 
                 # Write README.md
                 _readme_path = os.path.join(output_dir_path, 'README.md')
@@ -1610,10 +1706,8 @@ class FrequencyResponse:
                 )
 
             elif show_plot:
-                fig, ax = fr.plot_graph(show=show_plot)
-                plt.close(fig)
+                fr.plot_graph(show=True, close=False)
 
-            print(fr.name)
             n += 1
         print('Processed {n} headphones in {t:.0f}s'.format(n=n, t=time() - start_time))
 
@@ -1702,11 +1796,11 @@ class FrequencyResponse:
                                      'maximum positive gain. Defaults to {}.'.format(DEFAULT_MAX_GAIN))
         arg_parser.add_argument('--treble_f_lower', type=float, default=DEFAULT_TREBLE_F_LOWER,
                                 help='Lower bound for transition region between normal and treble frequencies. Treble '
-                                     'frequencies can have different smoothing, max gain and gain K. Defaults to '
+                                     'frequencies can have different max gain and gain K. Defaults to '
                                      '{}.'.format(DEFAULT_TREBLE_F_LOWER))
         arg_parser.add_argument('--treble_f_upper', type=float, default=DEFAULT_TREBLE_F_UPPER,
                                 help='Upper bound for transition region between normal and treble frequencies. Treble '
-                                     'frequencies can have different smoothing, max gain and gain K. Defaults to '
+                                     'frequencies can have different max gain and gain K. Defaults to '
                                      '{}.'.format(DEFAULT_TREBLE_F_UPPER))
         arg_parser.add_argument('--treble_max_gain', type=float, default=DEFAULT_TREBLE_MAX_GAIN,
                                 help='Maximum positive gain for equalization in treble region. Defaults to '
