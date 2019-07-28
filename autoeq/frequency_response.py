@@ -540,14 +540,14 @@ class FrequencyResponse:
         train_step = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
 
         # Optimization loop
-        t = time()
         min_loss = None
         threshold = 0.01
-        momentum = 300
+        momentum = 100
         bad_steps = 0
 
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
+            t = time()
             while time() - t < max_time:
                 step_loss, _ = sess.run([loss, train_step], feed_dict={learning_rate: learning_rate_value})
                 if min_loss is None or step_loss < min_loss:
@@ -601,7 +601,6 @@ class FrequencyResponse:
 
         coeffs_a = np.hstack((np.tile(a0, a1.shape), a1, a2))
         coeffs_b = np.hstack((b0, b1, b2))
-
         return _eq, rmse, np.squeeze(_fc, axis=1), np.squeeze(_Q, axis=1), np.squeeze(_gain, axis=1), coeffs_a, coeffs_b
 
     def optimize_parametric_eq(self, max_filters=None, fs=DEFAULT_FS):
@@ -742,15 +741,14 @@ class FrequencyResponse:
             # Reduce by max gain to avoid clipping with 1 dB of headroom
             fr.raw -= np.max(fr.raw)
             fr.raw -= 0.5
-        # Minimum phase transformation halves dB gain
-        # Maybe because it's only half long filter?
+        # Minimum phase transformation by scipy's homomorphic method halves dB gain
         fr.raw *= 2
         # Convert amplitude to linear scale
         fr.raw = 10 ** (fr.raw / 20)
         # Calculate response
         fr.frequency = np.append(fr.frequency, fs // 2)
         fr.raw = np.append(fr.raw, 0.0)
-        ir = firwin2(len(fr.frequency) * 2, fr.frequency, fr.raw, fs=fs)
+        ir = firwin2(len(fr.frequency) * 2 + 1, fr.frequency, fr.raw, fs=fs)
         # Convert to minimum phase
         ir = minimum_phase(ir)
         return ir
@@ -870,7 +868,7 @@ class FrequencyResponse:
 
         # Add fixed band eq
         fixed_band_eq_path = os.path.join(dir_path, model + ' FixedBandEQ.txt')
-        if os.path.isfile(fixed_band_eq_path) and self.parametric_eq is not None and len(self.parametric_eq):
+        if os.path.isfile(fixed_band_eq_path) and self.fixed_band_eq is not None and len(self.fixed_band_eq):
             preamp = np.min([0.0, float(-np.max(self.fixed_band_eq))]) - 0.5
 
             # Read Parametric eq
@@ -968,15 +966,40 @@ class FrequencyResponse:
         # Everything but raw data is affected by interpolating, reset them
         self.reset(raw=False)
 
-    def center(self):
-        """Removed bias from frequency response."""
-        interpolator = InterpolatedUnivariateSpline(np.log10(self.frequency), self.raw, k=1)
-        diff = interpolator(np.log10(1000))
+    def center(self, frequency=1000):
+        """Removed bias from frequency response.
+
+        Args:
+            frequency: Frequency which is set to 0 dB. If this is a list with two values then an average between the two
+                       frequencies is set to 0 dB.
+
+        Returns:
+            Gain shifted
+        """
+        equal_energy_fr = FrequencyResponse(name='equal_energy', frequency=self.frequency.copy(), raw=self.raw.copy())
+        equal_energy_fr.interpolate()
+        interpolator = InterpolatedUnivariateSpline(np.log10(equal_energy_fr.frequency), equal_energy_fr.raw, k=1)
+        if type(frequency) in [list, np.ndarray] and len(frequency) > 1:
+            # Use the average of the gain values between the given frequencies as the difference to be subtracted
+            diff = np.mean(equal_energy_fr.raw[np.logical_and(
+                equal_energy_fr.frequency >= frequency[0],
+                equal_energy_fr.frequency <= frequency[1]
+            )])
+        else:
+            if type(frequency) in [list, np.ndarray]:
+                # List or array with only one element
+                frequency = frequency[0]
+            # Use the gain value at the given frequency as the difference to be subtracted
+            diff = interpolator(np.log10(frequency))
+
         self.raw -= diff
         if len(self.smoothed):
             self.smoothed -= diff
+
         # Everything but raw, smoothed and target is affected by centering, reset them
         self.reset(raw=False, smoothed=False, target=False)
+
+        return -diff
 
     def _tilt(self, tilt=DEFAULT_TILT):
         """Creates a tilt for equalization.
@@ -1294,8 +1317,7 @@ class FrequencyResponse:
 
         if None in error or None in self.equalization or None in self.equalized_raw:
             # Must not contain None values
-            warn('None values detected during equalization, interpolating data with default parameters.')
-            self.interpolate()
+            raise ValueError('None values detected during equalization, interpolating data with default parameters.')
 
         # Invert with max gain clipping
         previous_clipped = False
@@ -1478,10 +1500,26 @@ class FrequencyResponse:
         """
         if parametric_eq and not equalize:
             raise ValueError('equalize must be True when parametric_eq is True.')
+
         if ten_band_eq:
+            # Ten band eq is a shortcut for setting Fc and Q values to standard 10-band equalizer filters parameters
             fixed_band_eq = True
             fc = np.array([31.25, 62.5, 125, 250, 500, 1000, 2000, 4000, 8000, 16000], dtype='float32')
             q = np.ones(10, dtype='float32') * np.sqrt(2)
+
+        if fixed_band_eq:
+            if fc is None or q is None:
+                raise ValueError('"fc" and "q" must be given when "fixed_band_eq" is given.')
+            # Center frequencies are given but Q is a single value
+            # Repeat Q to length of Fc
+            if type(q) in [list, np.ndarray]:
+                if len(q) == 1:
+                    q = np.repeat(q[0], len(fc))
+                elif len(q) != len(fc):
+                    raise ValueError('q must have one elemet or the same number of elements as fc.')
+            elif type(q) not in [list, np.ndarray]:
+                q = np.repeat(q, len(fc))
+
         if fixed_band_eq and not equalize:
             raise ValueError('equalize must be True when fixed_band_eq or ten_band_eq is True.')
 
@@ -1709,7 +1747,7 @@ class FrequencyResponse:
                 fr.plot_graph(show=True, close=False)
 
             n += 1
-        print('Processed {n} headphones in {t:.0f}s'.format(n=n, t=time() - start_time))
+        print('Processed {n} headphones in {t:.1f}s'.format(n=n, t=time() - start_time))
 
     @staticmethod
     def cli_args():
@@ -1736,7 +1774,8 @@ class FrequencyResponse:
         arg_parser.add_argument('--fixed_band_eq', action='store_true',
                                 help='Will produce fixed band eq settings if this parameter exists, no value needed.')
         arg_parser.add_argument('--fc', type=str, help='Comma separated list of center frequencies for fixed band eq.')
-        arg_parser.add_argument('--q', type=str, help='Comma separated list of Q values for fixed band eq.')
+        arg_parser.add_argument('--q', type=str, help='Comma separated list of Q values for fixed band eq. If only one '
+                                                      'value is passed it is used for all bands.')
         arg_parser.add_argument('--ten_band_eq', action='store_true',
                                 help='Shortcut parameter for activating standard ten band eq optimization.')
         arg_parser.add_argument('--max_filters', type=str, default=argparse.SUPPRESS,
