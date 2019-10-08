@@ -19,7 +19,7 @@ setup(
         'pandas',
         'scipy',
         'numpy',
-        'tensorflow(>=1.12.1)',
+        'tensorflow(<1.15.0)',
         'tabulate',
         'gevent',
         'soundfile'
