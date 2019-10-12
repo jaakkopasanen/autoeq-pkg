@@ -13,16 +13,17 @@ import soundfile as sf
 import numpy as np
 from glob import glob
 import urllib
-from warnings import warn
-import tensorflow as tf
 from time import time
 from tabulate import tabulate
 from PIL import Image
 import re
 from autoeq import biquad
 import warnings
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 
 ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+
 DEFAULT_F_MIN = 20
 DEFAULT_F_MAX = 20000
 DEFAULT_STEP = 1.01
@@ -151,31 +152,6 @@ class FrequencyResponse:
               equalized_smoothed=True,
               target=True):
         """Resets data."""
-        reset_data = []
-        if raw and len(self.raw):
-            reset_data.append('raw')
-        if smoothed and len(self.smoothed):
-            reset_data.append('smoothed')
-        if error and len(self.error):
-            reset_data.append('error')
-        if error_smoothed and len(self.error_smoothed):
-            reset_data.append('error_smoothed')
-        if equalization and len(self.equalization):
-            reset_data.append('equalization')
-        if parametric_eq and len(self.parametric_eq):
-            reset_data.append('parametric_eq')
-        if fixed_band_eq and len(self.fixed_band_eq):
-            reset_data.append('fixed_band_eq')
-        if equalized_raw and len(self.equalized_raw):
-            reset_data.append('equalized_raw')
-        if equalized_smoothed and len(self.equalized_smoothed):
-            reset_data.append('equalized_smoothed')
-        if target and len(self.target):
-            reset_data.append('target')
-        if len(reset_data):
-            warn('Resetting data of "{}". These need to be regenerated if they are still needed!'.format(
-                '", "'.join(reset_data)
-            ))
         if raw:
             self.raw = self._init_data(None)
         if smoothed:
@@ -912,9 +888,7 @@ class FrequencyResponse:
         # Write image link
         img_path = os.path.join(dir_path, model + '.png')
         if os.path.isfile(img_path):
-            img_rel_path = os.path.relpath(img_path, ROOT_DIR)
-            img_url = '/'.join(self._split_path(img_rel_path))
-            img_url = 'https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/{}'.format(img_url)
+            img_url = f'./{os.path.split(img_path)[1]}'
             img_url = urllib.parse.quote(img_url, safe="%/:=&?~#+!$,;'@()*[]")
             s += '''
             ### Graphs
@@ -1643,6 +1617,7 @@ class FrequencyResponse:
             sound_signature.center()
 
         n = 0
+        n_total = len(list(glob_files))
         for input_file_path in glob_files:
             if output_dir:
                 relative_path = os.path.relpath(input_file_path, input_dir)
@@ -1747,7 +1722,7 @@ class FrequencyResponse:
                 fr.plot_graph(show=True, close=False)
 
             n += 1
-        print('Processed {n} headphones in {t:.1f}s'.format(n=n, t=time() - start_time))
+            print(f'{n}/{n_total} ({n / n_total * 100:.1f}%) {time() - start_time:.0f}s: {fr.name}')
 
     @staticmethod
     def cli_args():
@@ -1774,8 +1749,10 @@ class FrequencyResponse:
         arg_parser.add_argument('--fixed_band_eq', action='store_true',
                                 help='Will produce fixed band eq settings if this parameter exists, no value needed.')
         arg_parser.add_argument('--fc', type=str, help='Comma separated list of center frequencies for fixed band eq.')
-        arg_parser.add_argument('--q', type=str, help='Comma separated list of Q values for fixed band eq. If only one '
-                                                      'value is passed it is used for all bands.')
+        arg_parser.add_argument('--q', type=str,
+                                help='Comma separated list of Q values for fixed band eq. If only one '
+                                     'value is passed it is used for all bands. Q value can be '
+                                     'calculated from bandwidth in N octaves by Q = 2^(N/2)/(2^N-1).')
         arg_parser.add_argument('--ten_band_eq', action='store_true',
                                 help='Shortcut parameter for activating standard ten band eq optimization.')
         arg_parser.add_argument('--max_filters', type=str, default=argparse.SUPPRESS,
