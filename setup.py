@@ -12,16 +12,15 @@ setup(
     licence='MIT Licence',
     description='Tool for equalizing headphones',
     platforms=['any'],
-    keywords=['mongodb', 'mongoengine'],
+    keywords=['headphones', 'equalization'],
     install_requires=[
-        'Pillow',
-        'matplotlib',
-        'pandas',
-        'scipy',
-        'numpy',
-        'tensorflow(<1.15.0)',
-        'tabulate',
-        'gevent',
-        'soundfile'
+        'Pillow~=6.2.0',
+        'matplotlib~=3.1.1',
+        'pandas~=0.25.1',
+        'scipy~=1.3.1',
+        'numpy~=1.17.2',
+        'tensorflow~=2.0.0',
+        'tabulate~=0.8.5',
+        'soundfile~=0.10.2'
     ]
 )
