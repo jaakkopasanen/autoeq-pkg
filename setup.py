@@ -3,8 +3,8 @@
 from distutils.core import setup
 
 setup(
-    name='AutoEQ',
-    version='1.0.0',
+    name='autoeq',
+    version='1.0.1',
     author='Jaakko Pasanen',
     packages=['autoeq'],
     scripts=[],
