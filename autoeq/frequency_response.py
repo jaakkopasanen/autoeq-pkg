@@ -3,52 +3,29 @@
 import os
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-import argparse
 import math
 import pandas as pd
 from io import StringIO
 from scipy.interpolate import InterpolatedUnivariateSpline
 from scipy.signal import savgol_filter, find_peaks, minimum_phase, firwin2
 from scipy.special import expit
-import soundfile as sf
+from scipy.stats import linregress
+from scipy.fftpack import next_fast_len
 import numpy as np
-from glob import glob
 import urllib
 from time import time
 from tabulate import tabulate
 from PIL import Image
 import re
-from autoeq import biquad
 import warnings
-
-ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
-
-DEFAULT_F_MIN = 20
-DEFAULT_F_MAX = 20000
-DEFAULT_STEP = 1.01
-
-DEFAULT_MAX_GAIN = 6.0
-DEFAULT_TREBLE_F_LOWER = 6000.0
-DEFAULT_TREBLE_F_UPPER = 8000.0
-DEFAULT_TREBLE_MAX_GAIN = 0.0
-DEFAULT_TREBLE_GAIN_K = 1.0
-
-DEFAULT_SMOOTHING_WINDOW_SIZE = 1 / 6
-DEFAULT_SMOOTHING_ITERATIONS = 1
-DEFAULT_TREBLE_SMOOTHING_F_LOWER = 100.0
-DEFAULT_TREBLE_SMOOTHING_F_UPPER = 10000.0
-DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE = 1 / 3
-DEFAULT_TREBLE_SMOOTHING_ITERATIONS = 1
-DEFAULT_TILT = 0.0
-DEFAULT_FS = 44100
-DEFAULT_BIT_DEPTH = 16
-DEFAULT_PHASE = 'minimum'
-DEFAULT_F_RES = 10
-DEFAULT_BASS_BOOST_GAIN = 0
-DEFAULT_BASS_BOOST_FC = 100
-DEFAULT_BASS_BOOST_Q = 0.65
-
-GRAPHIC_EQ_STEP = 1.1
+from autoeq import biquad
+from autoeq.constants import DEFAULT_F_MIN, DEFAULT_F_MAX, DEFAULT_STEP, DEFAULT_MAX_GAIN, DEFAULT_TREBLE_F_LOWER, \
+    DEFAULT_TREBLE_F_UPPER, DEFAULT_TREBLE_MAX_GAIN, DEFAULT_TREBLE_GAIN_K, DEFAULT_SMOOTHING_WINDOW_SIZE, \
+    DEFAULT_SMOOTHING_ITERATIONS, DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, \
+    DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_ITERATIONS, DEFAULT_TILT, DEFAULT_FS, \
+    DEFAULT_F_RES, DEFAULT_BASS_BOOST_GAIN, DEFAULT_BASS_BOOST_FC, \
+    DEFAULT_BASS_BOOST_Q, DEFAULT_GRAPHIC_EQ_STEP, HARMAN_INEAR_PREFENCE_FREQUENCIES, \
+    HARMAN_ONEAR_PREFERENCE_FREQUENCIES
 
 
 class FrequencyResponse:
@@ -65,6 +42,8 @@ class FrequencyResponse:
                  equalized_raw=None,
                  equalized_smoothed=None,
                  target=None):
+        if not name:
+            raise TypeError('Name must not be a non-empty string.')
         self.name = name.strip()
 
         self.frequency = self._init_data(frequency)
@@ -178,14 +157,14 @@ class FrequencyResponse:
     @classmethod
     def read_from_csv(cls, file_path):
         """Reads data from CSV file and constructs class instance."""
-        name = os.path.split(file_path)[-1].split('.')[0]
+        name = '.'.join(os.path.split(file_path)[1].split('.')[:-1])
 
         # Read file
-        f = open(file_path, 'r')
+        f = open(file_path, 'r', encoding='utf-8')
         s = f.read()
 
         # Regex for AutoEq style CSV
-        header_pattern = r'frequency(,(raw|smoothed|error|error_smoothed|equalization|parametric_eq|equalized_raw|equalized_smoothed|target))+'
+        header_pattern = r'frequency(,(raw|smoothed|error|error_smoothed|equalization|parametric_eq|fixed_band_eq|equalized_raw|equalized_smoothed|target))+'
         float_pattern = r'-?\d+\.?\d+'
         data_2_pattern = r'{fl}[ ,;:\t]+{fl}?'.format(fl=float_pattern)
         data_n_pattern = r'{fl}([ ,;:\t]+{fl})+?'.format(fl=float_pattern)
@@ -201,6 +180,7 @@ class FrequencyResponse:
             error_smoothed = list(df['error_smoothed']) if 'error_smoothed' in df else None
             equalization = list(df['equalization']) if 'equalization' in df else None
             parametric_eq = list(df['parametric_eq']) if 'parametric_eq' in df else None
+            fixed_band_eq = list(df['fixed_band_eq']) if 'fixed_band_eq' in df else None
             equalized_raw = list(df['equalized_raw']) if 'equalized_raw' in df else None
             equalized_smoothed = list(df['equalized_smoothed']) if 'equalized_smoothed' in df else None
             target = list(df['target']) if 'target' in df else None
@@ -213,6 +193,7 @@ class FrequencyResponse:
                 error_smoothed=error_smoothed,
                 equalization=equalization,
                 parametric_eq=parametric_eq,
+                fixed_band_eq=fixed_band_eq,
                 equalized_raw=equalized_raw,
                 equalized_smoothed=equalized_smoothed,
                 target=target
@@ -247,7 +228,7 @@ class FrequencyResponse:
         if len(self.parametric_eq):
             d['parametric_eq'] = [x if x is not None else 'NaN' for x in self.parametric_eq]
         if len(self.fixed_band_eq):
-            d['parametric_eq'] = [x if x is not None else 'NaN' for x in self.fixed_band_eq]
+            d['fixed_band_eq'] = [x if x is not None else 'NaN' for x in self.fixed_band_eq]
         if len(self.equalized_raw):
             d['equalized_raw'] = [x if x is not None else 'NaN' for x in self.equalized_raw]
         if len(self.equalized_smoothed):
@@ -262,12 +243,13 @@ class FrequencyResponse:
         df = pd.DataFrame(self.to_dict())
         df.to_csv(file_path, header=True, index=False, float_format='%.2f')
 
-    def write_eqapo_graphic_eq(self, file_path, normalize=True):
-        """Writes equalization graph to a file as Equalizer APO config."""
-        file_path = os.path.abspath(file_path)
-
+    def eqapo_graphic_eq(self, normalize=True, f_step=DEFAULT_GRAPHIC_EQ_STEP):
+        """Generates EqualizerAPO GraphicEQ string from equalization curve."""
         fr = FrequencyResponse(name='hack', frequency=self.frequency, raw=self.equalization)
-        fr.interpolate(f_min=DEFAULT_F_MIN, f_max=DEFAULT_F_MAX, f_step=GRAPHIC_EQ_STEP)
+        n = np.ceil(np.log(20000 / 20) / np.log(f_step))
+        f = 20 * f_step ** np.arange(n)
+        f = np.sort(np.unique(f.astype('int')))
+        fr.interpolate(f=f)
         if normalize:
             fr.raw -= np.max(fr.raw) + 0.5
             if fr.raw[0] > 0.0:
@@ -278,14 +260,21 @@ class FrequencyResponse:
         while np.abs(fr.raw[-1]) < 0.1 and np.abs(fr.raw[-2]) < 0.1:  # Last two are zeros
             fr.raw = fr.raw[:-1]
 
-        with open(file_path, 'w') as f:
-            s = '; '.join(['{f} {a:.1f}'.format(f=f, a=a) for f, a in zip(fr.frequency, fr.raw)])
-            s = 'GraphicEQ: ' + s
+        s = '; '.join(['{f} {a:.1f}'.format(f=f, a=a) for f, a in zip(fr.frequency, fr.raw)])
+        s = 'GraphicEQ: ' + s
+        return s
+
+    def write_eqapo_graphic_eq(self, file_path, normalize=True):
+        """Writes equalization graph to a file as Equalizer APO config."""
+        file_path = os.path.abspath(file_path)
+        s = self.eqapo_graphic_eq(normalize=normalize)
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write(s)
         return s
 
     @staticmethod
     def optimize_biquad_filters(frequency, target, max_time=5, max_filters=None, fs=DEFAULT_FS, fc=None, q=None):
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
         import tensorflow.compat.v1 as tf
         tf.get_logger().setLevel('ERROR')
         tf.disable_v2_behavior()
@@ -360,9 +349,9 @@ class FrequencyResponse:
                     # Interpolate between the two points
                     f_0 = peak_fc[pair_ind]
                     g_0 = peak_g[pair_ind]
-                    i_0 = np.where(frequency == f_0)[0][0]
+                    i_0 = np.argmin(np.abs(frequency - f_0))
                     f_1 = peak_fc[pair_ind + 1]
-                    i_1 = np.where(frequency == f_1)[0][0]
+                    i_1 = np.argmin(np.abs(frequency - f_1))
                     g_1 = peak_g[pair_ind]
                     interp = InterpolatedUnivariateSpline(np.log10([f_0, f_1]), [g_0, g_1], k=1)
                     line = interp(frequency[i_0:i_1 + 1])
@@ -682,7 +671,7 @@ class FrequencyResponse:
         """Writes EqualizerAPO Parameteric eq settings to a file."""
         file_path = os.path.abspath(file_path)
 
-        with open(file_path, 'w') as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(['Filter {i}: ON {type} Fc {fc:.0f} Hz Gain {gain:.1f} dB Q {Q:.2f}'.format(
                 i=i + 1,
                 type='PK',
@@ -731,8 +720,12 @@ class FrequencyResponse:
         f_min = np.max([fr.frequency[0], f_res])
         interpolator = InterpolatedUnivariateSpline(np.log10(fr.frequency), fr.raw, k=1)
         gain_f_min = interpolator(np.log10(f_min))
+        # Filter length, optimized for FFT speed
+        n = round(fs // 2 / f_res)
+        n = next_fast_len(n)
+        f = np.linspace(0.0, fs // 2, n)
         # Run interpolation
-        fr.interpolate(np.arange(0, fs // 2, f_res), pol_order=1)
+        fr.interpolate(f, pol_order=1)
         # Set gain for all frequencies below original minimum frequency to match gain at the original minimum frequency
         fr.raw[fr.frequency <= f_min] = gain_f_min
         if normalize:
@@ -743,12 +736,12 @@ class FrequencyResponse:
         fr.raw *= 2
         # Convert amplitude to linear scale
         fr.raw = 10 ** (fr.raw / 20)
+        # Zero gain at Nyquist frequency
+        fr.raw[-1] = 0.0
         # Calculate response
-        fr.frequency = np.append(fr.frequency, fs // 2)
-        fr.raw = np.append(fr.raw, 0.0)
-        ir = firwin2(len(fr.frequency) * 2 + 1, fr.frequency, fr.raw, fs=fs)
+        ir = firwin2(len(fr.frequency) * 2, fr.frequency, fr.raw, fs=fs)
         # Convert to minimum phase
-        ir = minimum_phase(ir)
+        ir = minimum_phase(ir, n_fft=len(ir))
         return ir
 
     def linear_phase_impulse_response(self, fs=DEFAULT_FS, f_res=DEFAULT_F_RES, normalize=True):
@@ -760,7 +753,7 @@ class FrequencyResponse:
         interpolator = InterpolatedUnivariateSpline(np.log10(fr.frequency), fr.raw, k=1)
         gain_f_min = interpolator(np.log10(f_min))
         # Run interpolation
-        fr.interpolate(np.arange(0, fs // 2, f_res))
+        fr.interpolate(np.arange(0.0, fs // 2, f_res), pol_order=1)
         # Set gain for all frequencies below original minimum frequency to match gain at the original minimum frequency
         fr.raw[fr.frequency <= f_min] = gain_f_min
         if normalize:
@@ -792,7 +785,7 @@ class FrequencyResponse:
             max_gains = [x + 0.5 for x in max_gains]
 
             # Read Parametric eq
-            with open(parametric_eq_path, 'r') as f:
+            with open(parametric_eq_path, 'r', encoding='utf-8') as f:
                 parametric_eq_str = f.read().strip()
 
             # Filters as Markdown table
@@ -867,7 +860,7 @@ class FrequencyResponse:
             preamp = np.min([0.0, float(-np.max(self.fixed_band_eq))]) - 0.5
 
             # Read Parametric eq
-            with open(fixed_band_eq_path, 'r') as f:
+            with open(fixed_band_eq_path, 'r', encoding='utf-8') as f:
                 fixed_band_eq_str = f.read().strip()
 
             # Filters as Markdown table
@@ -915,24 +908,17 @@ class FrequencyResponse:
             '''.format(img_url)
 
         # Write file
-        with open(file_path, 'w') as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write(re.sub('\n[ \t]+', '\n', s).strip())
 
     @staticmethod
     def generate_frequencies(f_min=DEFAULT_F_MIN, f_max=DEFAULT_F_MAX, f_step=DEFAULT_STEP):
-        freq_new = []
-        # Frequencies from 20 kHz down
-        f = np.min([20000, f_max])
-        while f > f_min:
-            freq_new.append(int(round(f)))
-            f = f / f_step
-        # Frequencies from 20 kHz up
-        f = np.min([20000, f_max])
-        while f < f_max:
-            freq_new.append(int(round(f)))
-            f = f * f_step
-        freq_new = sorted(set(freq_new))  # Remove duplicates and sort ascending
-        return np.array(freq_new)
+        freq = []
+        f = f_min
+        while f <= f_max:
+            freq.append(f)
+            f *= f_step
+        return np.array(freq)
 
     def interpolate(self, f=None, f_step=DEFAULT_STEP, pol_order=1, f_min=DEFAULT_F_MIN, f_max=DEFAULT_F_MAX):
         """Interpolates missing values from previous and next value. Resets all but raw data."""
@@ -956,7 +942,7 @@ class FrequencyResponse:
         if f is None:
             self.frequency = self.generate_frequencies(f_min=f_min, f_max=f_max, f_step=f_step)
         else:
-            self.frequency = f
+            self.frequency = np.array(f)
 
         # Prevent log10 from exploding by replacing zero frequency with small value
         zero_freq_fix = False
@@ -1069,13 +1055,7 @@ class FrequencyResponse:
         """Sets target and error curves."""
         # Copy and center compensation data
         compensation = FrequencyResponse(name='compensation', frequency=compensation.frequency, raw=compensation.raw)
-        compensation.smoothen_fractional_octave(
-            window_size=DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-            iterations=DEFAULT_TREBLE_SMOOTHING_ITERATIONS
-        )
         compensation.center()
-        compensation.raw = compensation.smoothed
-        compensation.smoothed = np.array([])
 
         # Set target
         self.target = compensation.raw + self.create_target(
@@ -1378,6 +1358,17 @@ class FrequencyResponse:
         if len(self.smoothed):
             self.equalized_smoothed = self.smoothed + self.equalization
 
+    @staticmethod
+    def kwarg_defaults(kwargs, **defaults):
+        if kwargs is None:
+            kwargs = {}
+        else:
+            kwargs = {key: val for key, val in kwargs.items()}
+        for key, val in defaults.items():
+            if key not in kwargs:
+                kwargs[key] = val
+        return kwargs
+
     def plot_graph(self,
                    fig=None,
                    ax=None,
@@ -1397,44 +1388,79 @@ class FrequencyResponse:
                    a_min=None,
                    a_max=None,
                    color='black',
+                   raw_plot_kwargs=None,
+                   smoothed_plot_kwargs=None,
+                   error_plot_kwargs=None,
+                   error_smoothed_plot_kwargs=None,
+                   equalization_plot_kwargs=None,
+                   parametric_eq_plot_kwargs=None,
+                   fixed_band_eq_plot_kwargs=None,
+                   equalized_plot_kwargs=None,
+                   target_plot_kwargs=None,
                    close=False):
         """Plots frequency response graph."""
         if fig is None:
             fig, ax = plt.subplots()
             fig.set_size_inches(12, 8)
-        legend = []
         if not len(self.frequency):
             raise ValueError('\'frequency\' has no data!')
+
         if target and len(self.target):
-            ax.plot(self.frequency, self.target, linewidth=5, color='lightblue')
-            legend.append('Target')
+            ax.plot(
+                self.frequency, self.target,
+                **self.kwarg_defaults(target_plot_kwargs, label='Target', linewidth=5, color='lightblue')
+            )
+
         if smoothed and len(self.smoothed):
-            ax.plot(self.frequency, self.smoothed, linewidth=5, color='lightgrey')
-            legend.append('Raw Smoothed')
+            ax.plot(
+                self.frequency, self.smoothed,
+                **self.kwarg_defaults(smoothed_plot_kwargs, label='Raw Smoothed', linewidth=5, color='lightgrey')
+            )
+
         if error_smoothed and len(self.error_smoothed):
-            ax.plot(self.frequency, self.error_smoothed, linewidth=5, color='pink')
-            legend.append('Error Smoothed')
+            ax.plot(
+                self.frequency, self.error_smoothed,
+                **self.kwarg_defaults(error_smoothed_plot_kwargs, label='Error Smoothed', linewidth=5, color='pink')
+            )
+
         if raw and len(self.raw):
-            ax.plot(self.frequency, self.raw, linewidth=1, color=color)
-            legend.append('Raw')
+            ax.plot(
+                self.frequency, self.raw,
+                **self.kwarg_defaults(raw_plot_kwargs, label='Raw', linewidth=1, color=color)
+            )
+
         if error and len(self.error):
-            ax.plot(self.frequency, self.error, linewidth=1, color='red')
-            legend.append('Error')
-        if parametric_eq and len(self.parametric_eq):
-            ax.plot(self.frequency, self.parametric_eq, linewidth=5, color='lightgreen')
-            legend.append('Parametric Eq')
-        if fixed_band_eq and len(self.fixed_band_eq):
-            ax.plot(self.frequency, self.fixed_band_eq, linewidth=5, color='limegreen')
-            legend.append('Fixed Band Eq')
+            ax.plot(
+                self.frequency, self.error,
+                **self.kwarg_defaults(error_plot_kwargs, label='Error', linewidth=1, color='red')
+            )
+
         if equalization and len(self.equalization):
-            ax.plot(self.frequency, self.equalization, linewidth=1, color='darkgreen')
-            legend.append('Equalization')
-        if equalized and len(self.equalized_raw) and not len(self.equalized_smoothed):
-            ax.plot(self.frequency, self.equalized_raw, linewidth=1, color='magenta')
-            legend.append('Equalized raw')
-        if equalized and len(self.equalized_smoothed):
-            ax.plot(self.frequency, self.equalized_smoothed, linewidth=1, color='blue')
-            legend.append('Equalized smoothed')
+            ax.plot(
+                self.frequency, self.equalization,
+                **self.kwarg_defaults(equalization_plot_kwargs, label='Equalization', linewidth=5, color='lightgreen')
+            )
+
+        if parametric_eq and len(self.parametric_eq):
+            ax.plot(
+                self.frequency, self.parametric_eq,
+                **self.kwarg_defaults(parametric_eq_plot_kwargs, label='Parametric Eq', linewidth=1, color='darkgreen')
+            )
+
+        if fixed_band_eq and len(self.fixed_band_eq):
+            ax.plot(
+                self.frequency, self.fixed_band_eq,
+                **self.kwarg_defaults(
+                    fixed_band_eq_plot_kwargs,
+                    label='Fixed Band Eq', linewidth=1, color='darkgreen', linestyle='--'
+                )
+            )
+
+        if equalized and len(self.equalized_raw):
+            ax.plot(
+                self.frequency, self.equalized_raw,
+                **self.kwarg_defaults(equalized_plot_kwargs, label='Equalized', linewidth=1, color='blue')
+            )
 
         ax.set_xlabel('Frequency (Hz)')
         ax.semilogx()
@@ -1442,7 +1468,7 @@ class FrequencyResponse:
         ax.set_ylabel('Amplitude (dBr)')
         ax.set_ylim([a_min, a_max])
         ax.set_title(self.name)
-        ax.legend(legend, fontsize=8)
+        ax.legend(fontsize=8)
         ax.grid(True, which='major')
         ax.grid(True, which='minor')
         ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
@@ -1457,6 +1483,52 @@ class FrequencyResponse:
         elif close:
             plt.close(fig)
         return fig, ax
+
+    def harman_onear_preference_score(self):
+        """Calculates Harman preference score for over-ear and on-ear headphones.
+
+        Returns:
+            - score: Preference score
+            - std: Standard deviation of error
+            - slope: Slope of linear regression of error
+        """
+        fr = self.copy()
+        fr.interpolate(HARMAN_ONEAR_PREFERENCE_FREQUENCIES)
+        sl = np.logical_and(fr.frequency >= 50, fr.frequency <= 10000)
+        x = fr.frequency[sl]
+        y = fr.error[sl]
+
+        std = np.std(y, ddof=1)  # ddof=1 is required to get the exact same numbers as the Excel from Listen Inc gives
+        slope, _, _, _, _ = linregress(np.log(x), y)
+        score = 114.490443008238 - 12.62 * std - 15.5163857197367 * np.abs(slope)
+
+        return score, std, slope
+
+    def harman_inear_preference_score(self):
+        """Calculates Harman preference score for in-ear headphones.
+
+        Returns:
+            - score: Preference score
+            - std: Standard deviation of error
+            - slope: Slope of linear regression of error
+            - mean: Mean of absolute error
+        """
+        fr = self.copy()
+        fr.interpolate(HARMAN_INEAR_PREFENCE_FREQUENCIES)
+        sl = np.logical_and(fr.frequency >= 20, fr.frequency <= 10000)
+        x = fr.frequency[sl]
+        y = fr.error[sl]
+
+        std = np.std(y, ddof=1)  # ddof=1 is required to get the exact same numbers as the Excel from Listen Inc gives
+        slope, _, _, _, _ = linregress(np.log(x), y)
+        # Mean of absolute of error centered by 500 Hz
+        delta = fr.error[np.where(fr.frequency == 500.0)[0][0]]
+        y = fr.error[np.logical_and(fr.frequency >= 40, fr.frequency <= 10000)] - delta
+        mean = np.mean(np.abs(y))
+        # Final score
+        score = 100.0795 - 8.5 * std - 6.796 * np.abs(slope) - 3.475 * mean
+
+        return score, std, slope, mean
 
     def process(self,
                 compensation=None,
@@ -1561,6 +1633,12 @@ class FrequencyResponse:
 
         # Smooth data
         self.smoothen_heavy_light()
+        self.smoothen_fractional_octave(
+            window_size=1 / 3,
+            treble_window_size=1.4,
+            treble_f_lower=6000,
+            treble_f_upper=12000
+        )
 
         peq_filters = n_peq_filters = peq_max_gains = fbeq_filters = n_fbeq_filters = nfbeq_max_gains = None
         # Equalize
@@ -1580,300 +1658,3 @@ class FrequencyResponse:
                 fbeq_filters, n_fbeq_filters, nfbeq_max_gains = self.optimize_fixed_band_eq(fc=fc, q=q, fs=fs)
 
         return peq_filters, n_peq_filters, peq_max_gains, fbeq_filters, n_fbeq_filters, nfbeq_max_gains
-
-    @staticmethod
-    def main(input_dir=None,
-             output_dir=None,
-             new_only=False,
-             standardize_input=False,
-             compensation=None,
-             equalize=False,
-             parametric_eq=False,
-             fixed_band_eq=False,
-             fc=None,
-             q=None,
-             ten_band_eq=False,
-             max_filters=None,
-             fs=DEFAULT_FS,
-             bit_depth=DEFAULT_BIT_DEPTH,
-             phase=DEFAULT_PHASE,
-             f_res=DEFAULT_F_RES,
-             bass_boost_gain=DEFAULT_BASS_BOOST_GAIN,
-             bass_boost_fc=DEFAULT_BASS_BOOST_FC,
-             bass_boost_q=DEFAULT_BASS_BOOST_Q,
-             tilt=None,
-             sound_signature=None,
-             max_gain=DEFAULT_MAX_GAIN,
-             treble_f_lower=DEFAULT_TREBLE_F_LOWER,
-             treble_f_upper=DEFAULT_TREBLE_F_UPPER,
-             treble_max_gain=DEFAULT_TREBLE_MAX_GAIN,
-             treble_gain_k=DEFAULT_TREBLE_GAIN_K,
-             show_plot=False):
-        """Parses files in input directory and produces equalization results in output directory."""
-        start_time = time()
-
-        # Dir paths to absolute
-        input_dir = os.path.abspath(input_dir)
-        glob_files = glob(os.path.join(input_dir, '**', '*.csv'), recursive=True)
-        if len(glob_files) == 0:
-            raise FileNotFoundError('No CSV files found in "{}"'.format(input_dir))
-
-        if compensation:
-            # Creates FrequencyResponse for compensation data
-            compensation_path = os.path.abspath(compensation)
-            compensation = FrequencyResponse.read_from_csv(compensation_path)
-            compensation.interpolate()
-            compensation.center()
-
-        if bit_depth == 16:
-            bit_depth = "PCM_16"
-        elif bit_depth == 24:
-            bit_depth = "PCM_24"
-        elif bit_depth == 32:
-            bit_depth = "PCM_32"
-        else:
-            raise ValueError('Invalid bit depth. Accepted values are 16, 24 e 32.')
-
-        if sound_signature is not None:
-            sound_signature = FrequencyResponse.read_from_csv(sound_signature)
-            if len(sound_signature.error) > 0:
-                # Error data present, replace raw data with it
-                sound_signature.raw = sound_signature.error
-            sound_signature.interpolate()
-            sound_signature.center()
-
-        n = 0
-        n_total = len(list(glob_files))
-        for input_file_path in glob_files:
-            if output_dir:
-                relative_path = os.path.relpath(input_file_path, input_dir)
-                output_file_path = os.path.join(output_dir, relative_path)
-                if os.path.isfile(output_file_path) and new_only:
-                    # Skip file for which result already exists
-                    continue
-                output_dir_path = os.path.dirname(output_file_path)
-
-            # Read data from input file
-            fr = FrequencyResponse.read_from_csv(input_file_path)
-
-            if standardize_input:
-                # Overwrite input data in standard sampling and bias
-                fr.interpolate()
-                fr.center()
-                fr.write_to_csv(input_file_path)
-
-            # Process and equalize
-            peq_filters, n_peq_filters, peq_max_gains, fbeq_filters, n_fbeq_filters, fbeq_max_gains = fr.process(
-                compensation=compensation,
-                min_mean_error=True,
-                equalize=equalize,
-                parametric_eq=parametric_eq,
-                fixed_band_eq=fixed_band_eq,
-                fc=fc,
-                q=q,
-                ten_band_eq=ten_band_eq,
-                max_filters=max_filters,
-                bass_boost_gain=bass_boost_gain,
-                bass_boost_fc=bass_boost_fc,
-                bass_boost_q=bass_boost_q,
-                tilt=tilt,
-                sound_signature=sound_signature,
-                max_gain=max_gain,
-                treble_f_lower=treble_f_lower,
-                treble_f_upper=treble_f_upper,
-                treble_max_gain=treble_max_gain,
-                treble_gain_k=treble_gain_k,
-                fs=fs
-            )
-
-            if output_dir:
-                # Copy relative path to output directory
-                if not os.path.isdir(output_dir_path):
-                    os.makedirs(output_dir_path, exist_ok=True)
-
-                if equalize:
-                    # Write EqualizerAPO GraphicEq settings to file
-                    fr.write_eqapo_graphic_eq(output_file_path.replace('.csv', ' GraphicEQ.txt'), normalize=True)
-                    if parametric_eq:
-                        # Write ParametricEq settings to file
-                        fr.write_eqapo_parametric_eq(output_file_path.replace('.csv', ' ParametricEQ.txt'), peq_filters)
-
-                    # Write fixed band eq
-                    if fixed_band_eq or ten_band_eq:
-                        # Write fixed band eq settings to file
-                        fr.write_eqapo_parametric_eq(output_file_path.replace('.csv', ' FixedBandEQ.txt'), fbeq_filters)
-
-                    # Write impulse response as WAV
-                    fss = [44100, 48000] if fs in [44100, 48000] else [fs]
-                    for _fs in fss:
-                        if phase in ['linear', 'both']:
-                            # Write linear phase impulse response
-                            linear_phase_ir = fr.linear_phase_impulse_response(fs=_fs, f_res=f_res, normalize=True)
-                            linear_phase_ir = np.tile(linear_phase_ir, (2, 1)).T
-                            sf.write(
-                                output_file_path.replace('.csv', ' linear phase {}Hz.wav'.format(_fs)),
-                                linear_phase_ir,
-                                _fs,
-                                bit_depth
-                            )
-                        if phase in ['minimum', 'both']:
-                            # Write minimum phase impulse response
-                            minimum_phase_ir = fr.minimum_phase_impulse_response(fs=_fs, f_res=f_res, normalize=True)
-                            minimum_phase_ir = np.tile(minimum_phase_ir, (2, 1)).T
-                            sf.write(
-                                output_file_path.replace('.csv', ' minimum phase {}Hz.wav'.format(_fs)),
-                                minimum_phase_ir,
-                                _fs,
-                                bit_depth
-                            )
-
-                # Write results to CSV file
-                fr.write_to_csv(output_file_path)
-
-                # Write plots to file and optionally display them
-                fr.plot_graph(
-                    show=show_plot,
-                    close=not show_plot,
-                    file_path=output_file_path.replace('.csv', '.png'),
-                )
-
-                # Write README.md
-                _readme_path = os.path.join(output_dir_path, 'README.md')
-                fr.write_readme(
-                    _readme_path,
-                    max_filters=n_peq_filters,
-                    max_gains=peq_max_gains
-                )
-
-            elif show_plot:
-                fr.plot_graph(show=True, close=False)
-
-            n += 1
-            print(f'{n}/{n_total} ({n / n_total * 100:.1f}%) {time() - start_time:.0f}s: {fr.name}')
-
-    @staticmethod
-    def cli_args():
-        """Parses command line arguments."""
-        arg_parser = argparse.ArgumentParser()
-        arg_parser.add_argument('--input_dir', type=str, required=True,
-                                help='Path to input data directory. Will look for CSV files in the data directory and '
-                                     'recursively in sub-directories.')
-        arg_parser.add_argument('--output_dir', type=str, default=argparse.SUPPRESS,
-                                help='Path to results directory. Will keep the same relative paths for files found '
-                                     'in input_dir.')
-        arg_parser.add_argument('--standardize_input', action='store_true',
-                                help='Overwrite input data in standardized sampling and bias?')
-        arg_parser.add_argument('--new_only', action='store_true',
-                                help='Only process input files which don\'t have results in output directory.')
-        arg_parser.add_argument('--compensation', type=str,
-                                help='File path to CSV containing compensation (target) curve. Compensation is '
-                                     'necessary when equalizing because all input data is raw microphone data. See '
-                                     '"compensation", "innerfidelity/resources" and "headphonecom/resources".')
-        arg_parser.add_argument('--equalize', action='store_true',
-                                help='Will run equalization if this parameter exists, no value needed.')
-        arg_parser.add_argument('--parametric_eq', action='store_true',
-                                help='Will produce parametric eq settings if this parameter exists, no value needed.')
-        arg_parser.add_argument('--fixed_band_eq', action='store_true',
-                                help='Will produce fixed band eq settings if this parameter exists, no value needed.')
-        arg_parser.add_argument('--fc', type=str, help='Comma separated list of center frequencies for fixed band eq.')
-        arg_parser.add_argument('--q', type=str,
-                                help='Comma separated list of Q values for fixed band eq. If only one '
-                                     'value is passed it is used for all bands. Q value can be '
-                                     'calculated from bandwidth in N octaves by Q = 2^(N/2)/(2^N-1).')
-        arg_parser.add_argument('--ten_band_eq', action='store_true',
-                                help='Shortcut parameter for activating standard ten band eq optimization.')
-        arg_parser.add_argument('--max_filters', type=str, default=argparse.SUPPRESS,
-                                help='Maximum number of filters for parametric EQ. Multiple cumulative optimization '
-                                     'runs can be done by giving multiple filter counts separated by "+". "5+5" would '
-                                     'create 10 filters where the first 5 are usable independently from the rest 5 and '
-                                     'the last 5 can only be used with the first 5. This allows to have muliple '
-                                     'configurations for equalizers with different number of bands available. '
-                                     'Not limited by default.')
-        arg_parser.add_argument('--fs', type=int, default=DEFAULT_FS,
-                                help='Sampling frequency for impulse response and parametric eq filters. '
-                                     'Defaults to {}.'.format(DEFAULT_FS))
-        arg_parser.add_argument('--bit_depth', type=int, default=DEFAULT_BIT_DEPTH,
-                                help='Number of bits for every sample in impulse response. '
-                                     'Defaults to {}.'.format(DEFAULT_BIT_DEPTH))
-        arg_parser.add_argument('--phase', type=str, default=DEFAULT_PHASE,
-                                help='Impulse response phase characteristic. "minimum", "linear" or "both". '
-                                     'Defaults to "{}"'.format(DEFAULT_PHASE))
-        arg_parser.add_argument('--f_res', type=float, default=DEFAULT_F_RES,
-                                help='Frequency resolution for impulse responses. If this is 20 then impulse response '
-                                     'frequency domain will be sampled every 20 Hz. Filter length for '
-                                     'impulse responses will be fs/f_res. Defaults to {}.'.format(DEFAULT_F_RES))
-        arg_parser.add_argument('--bass_boost', type=str, default=argparse.SUPPRESS,
-                                help='Bass boost shelf. Sub-bass frequencies will be boosted by this amount. Can be '
-                                     'either a single value for a gain in dB or a comma separated list of three values '
-                                     'for parameters of a low shelf filter, where the first is gain in dB, second is '
-                                     'center frequency (Fc) in Hz and the last is quality (Q). When only a single '
-                                     'value (gain) is given, default values for Fc and Q are used which are '
-                                     f'{DEFAULT_BASS_BOOST_FC} Hz and {DEFAULT_BASS_BOOST_Q}, '
-                                     'respectively. For example "--bass_boost=6" or "--bass_boost=9.5,150,0.69".')
-        arg_parser.add_argument('--iem_bass_boost', type=float, default=argparse.SUPPRESS,
-                                help='iem_bass_boost argument has been removed, use "--bass_boost" instead!')
-        arg_parser.add_argument('--tilt', type=float, default=argparse.SUPPRESS,
-                                help='Target tilt in dB/octave. Positive value (upwards slope) will result in brighter '
-                                     'frequency response and negative value (downwards slope) will result in darker '
-                                     'frequency response. 1 dB/octave will produce nearly 10 dB difference in '
-                                     'desired value between 20 Hz and 20 kHz. Tilt is applied with bass boost and both '
-                                     'will affect the bass gain.')
-        arg_parser.add_argument('--sound_signature', type=str,
-                                help='File path to a sound signature CSV file. The CSV file must be in an AutoEQ '
-                                     'understandable format. Error data will be used as the sound signature target if '
-                                     'the CSV file contains an error column and otherwise the raw column will be used. '
-                                     'This means there are two different options for using sound signature: 1st is '
-                                     'pointing it to a result CSV file of a previous run and the 2nd is to create a '
-                                     'CSV file with just frequency and raw columns by hand (or other means). The Sound '
-                                     'signature graph will be interpolated so any number of point at any frequencies '
-                                     'will do, making it easy to create simple signatures with as little as two or '
-                                     'three points.')
-        arg_parser.add_argument('--max_gain', type=float, default=DEFAULT_MAX_GAIN,
-                                help='Maximum positive gain in equalization. Higher max gain allows to equalize deeper '
-                                     'dips in  frequency response but will limit output volume if no analog gain is '
-                                     'available because positive gain requires negative digital preamp equal to '
-                                     'maximum positive gain. Defaults to {}.'.format(DEFAULT_MAX_GAIN))
-        arg_parser.add_argument('--treble_f_lower', type=float, default=DEFAULT_TREBLE_F_LOWER,
-                                help='Lower bound for transition region between normal and treble frequencies. Treble '
-                                     'frequencies can have different max gain and gain K. Defaults to '
-                                     '{}.'.format(DEFAULT_TREBLE_F_LOWER))
-        arg_parser.add_argument('--treble_f_upper', type=float, default=DEFAULT_TREBLE_F_UPPER,
-                                help='Upper bound for transition region between normal and treble frequencies. Treble '
-                                     'frequencies can have different max gain and gain K. Defaults to '
-                                     '{}.'.format(DEFAULT_TREBLE_F_UPPER))
-        arg_parser.add_argument('--treble_max_gain', type=float, default=DEFAULT_TREBLE_MAX_GAIN,
-                                help='Maximum positive gain for equalization in treble region. Defaults to '
-                                     '{}.'.format(DEFAULT_TREBLE_MAX_GAIN))
-        arg_parser.add_argument('--treble_gain_k', type=float, default=DEFAULT_TREBLE_GAIN_K,
-                                help='Coefficient for treble gain, affects both positive and negative gain. Useful for '
-                                     'disabling or reducing equalization power in treble region. Defaults to '
-                                     '{}.'.format(DEFAULT_TREBLE_GAIN_K))
-        arg_parser.add_argument('--show_plot', action='store_true',
-                                help='Plot will be shown if this parameter exists, no value needed.')
-        args = vars(arg_parser.parse_args())
-        if 'iem_bass_boost' in args:
-            raise TypeError('iem_bass_boost argument has been removed, use "--bass_boost" instead!')
-        if 'bass_boost' in args:
-            bass_boost = args['bass_boost'].split(',')
-            if len(bass_boost) == 1:
-                args['bass_boost_gain'] = float(bass_boost[0])
-                args['bass_boost_fc'] = DEFAULT_BASS_BOOST_FC
-                args['bass_boost_q'] = DEFAULT_BASS_BOOST_Q
-            elif len(bass_boost) == 3:
-                args['bass_boost_gain'] = float(bass_boost[0])
-                args['bass_boost_fc'] = float(bass_boost[1])
-                args['bass_boost_q'] = float(bass_boost[2])
-            else:
-                raise ValueError('"--bass_boost" must have one value or three values separated by commas!')
-            del args['bass_boost']
-        if 'max_filters' in args:
-            args['max_filters'] = [int(x) for x in args['max_filters'].split('+')]
-        if 'fc' in args and args['fc'] is not None:
-            args['fc'] = [float(x) for x in args['fc'].split(',')]
-        if 'q' in args and args['q'] is not None:
-            args['q'] = [float(x) for x in args['q'].split(',')]
-        return args
-
-
-if __name__ == '__main__':
-    FrequencyResponse.main(**FrequencyResponse.cli_args())

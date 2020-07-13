@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name='autoeq',
-    version='1.2.1',
+    version='1.2.2',
     author='Jaakko Pasanen',
     packages=['autoeq'],
     scripts=[],
