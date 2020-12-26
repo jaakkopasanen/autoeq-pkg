@@ -19,7 +19,7 @@ setup(
         'pandas~=0.25.1',
         'scipy~=1.3.1',
         'numpy~=1.17.2',
-        'tensorflow~=2.0.0',
+        'tensorflow~=2.3.0',
         'tabulate~=0.8.5',
         'soundfile~=0.10.2'
     ]
