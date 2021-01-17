@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.0.0 - 2021-01-17
+Removed `treble_max_gain`. Limited slope equalization algorithm. Updated dependency versions.
+
 ## 1.2.4 - 2020-09-20
 Upgraded Pillow version to 7.2.
 

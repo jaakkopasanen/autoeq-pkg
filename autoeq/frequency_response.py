@@ -20,12 +20,11 @@ import re
 import warnings
 from autoeq import biquad
 from autoeq.constants import DEFAULT_F_MIN, DEFAULT_F_MAX, DEFAULT_STEP, DEFAULT_MAX_GAIN, DEFAULT_TREBLE_F_LOWER, \
-    DEFAULT_TREBLE_F_UPPER, DEFAULT_TREBLE_MAX_GAIN, DEFAULT_TREBLE_GAIN_K, DEFAULT_SMOOTHING_WINDOW_SIZE, \
-    DEFAULT_SMOOTHING_ITERATIONS, DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, \
-    DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_ITERATIONS, DEFAULT_TILT, DEFAULT_FS, \
-    DEFAULT_F_RES, DEFAULT_BASS_BOOST_GAIN, DEFAULT_BASS_BOOST_FC, \
-    DEFAULT_BASS_BOOST_Q, DEFAULT_GRAPHIC_EQ_STEP, HARMAN_INEAR_PREFENCE_FREQUENCIES, \
-    HARMAN_ONEAR_PREFERENCE_FREQUENCIES
+    DEFAULT_TREBLE_F_UPPER, DEFAULT_TREBLE_GAIN_K, DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_SMOOTHING_ITERATIONS, \
+    DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE, \
+    DEFAULT_TREBLE_SMOOTHING_ITERATIONS, DEFAULT_TILT, DEFAULT_FS, DEFAULT_F_RES, DEFAULT_BASS_BOOST_GAIN, \
+    DEFAULT_BASS_BOOST_FC, DEFAULT_BASS_BOOST_Q, DEFAULT_GRAPHIC_EQ_STEP, HARMAN_INEAR_PREFENCE_FREQUENCIES, \
+    HARMAN_ONEAR_PREFERENCE_FREQUENCIES, PREAMP_HEADROOM
 
 
 class FrequencyResponse:
@@ -63,7 +62,7 @@ class FrequencyResponse:
         self._sort()
 
     def copy(self, name=None):
-        return FrequencyResponse(
+        return self.__class__(
             name=self.name + '_copy' if name is None else name,
             frequency=self._init_data(self.frequency),
             raw=self._init_data(self.raw),
@@ -96,7 +95,7 @@ class FrequencyResponse:
         sorted_inds = self.frequency.argsort()
         self.frequency = self.frequency[sorted_inds]
         for i in range(1, len(self.frequency)):
-            if self.frequency[i] == self.frequency[i - 1]:
+            if self.frequency[i] == self.frequency[i-1]:
                 raise ValueError('Duplicate values found at frequency {}. Remove duplicates manually.'.format(
                     self.frequency[i])
                 )
@@ -245,13 +244,13 @@ class FrequencyResponse:
 
     def eqapo_graphic_eq(self, normalize=True, f_step=DEFAULT_GRAPHIC_EQ_STEP):
         """Generates EqualizerAPO GraphicEQ string from equalization curve."""
-        fr = FrequencyResponse(name='hack', frequency=self.frequency, raw=self.equalization)
+        fr = self.__class__(name='hack', frequency=self.frequency, raw=self.equalization)
         n = np.ceil(np.log(20000 / 20) / np.log(f_step))
-        f = 20 * f_step ** np.arange(n)
+        f = 20 * f_step**np.arange(n)
         f = np.sort(np.unique(f.astype('int')))
         fr.interpolate(f=f)
         if normalize:
-            fr.raw -= np.max(fr.raw) + 0.5
+            fr.raw -= np.max(fr.raw) + PREAMP_HEADROOM
             if fr.raw[0] > 0.0:
                 # Prevent bass boost below lowest frequency
                 fr.raw[0] = 0.0
@@ -272,8 +271,8 @@ class FrequencyResponse:
             f.write(s)
         return s
 
-    @staticmethod
-    def optimize_biquad_filters(frequency, target, max_time=5, max_filters=None, fs=DEFAULT_FS, fc=None, q=None):
+    @classmethod
+    def optimize_biquad_filters(cls, frequency, target, max_time=5, max_filters=None, fs=DEFAULT_FS, fc=None, q=None):
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
         import tensorflow.compat.v1 as tf
         tf.get_logger().setLevel('ERROR')
@@ -297,7 +296,7 @@ class FrequencyResponse:
         fs_tf = tf.constant(fs, name='f', dtype='float32')
 
         # Smoothen heavily
-        fr_target = FrequencyResponse(name='Filter Initialization', frequency=frequency, raw=target)
+        fr_target = cls(name='Filter Initialization', frequency=frequency, raw=target)
         fr_target.smoothen_fractional_octave(window_size=1 / 7, iterations=1000)
 
         # Equalization target
@@ -470,9 +469,9 @@ class FrequencyResponse:
         b2_ls = ((A * ((A + 1) - (A - 1) * tf.cos(w0) - 2 * tf.sqrt(A) * alpha)) / a0_ls)
 
         # Peak filter
-        A = 10 ** (gain[n_ls:n_ls + n_pk, :] / 40)
-        w0 = 2 * np.pi * tf.pow(10.0, fc[n_ls:n_ls + n_pk, :]) / fs_tf
-        alpha = tf.sin(w0) / (2 * Q[n_ls:n_ls + n_pk, :])
+        A = 10 ** (gain[n_ls:n_ls+n_pk, :] / 40)
+        w0 = 2 * np.pi * tf.pow(10.0, fc[n_ls:n_ls+n_pk, :]) / fs_tf
+        alpha = tf.sin(w0) / (2 * Q[n_ls:n_ls+n_pk, :])
 
         a0_pk = (1 + alpha / A)
         a1_pk = -(-2 * tf.cos(w0)) / a0_pk
@@ -484,9 +483,9 @@ class FrequencyResponse:
 
         # High self filter
         # This is not kept at the moment but kept for future
-        A = 10 ** (gain[n_ls + n_pk:, :] / 40)
-        w0 = 2 * np.pi * tf.pow(10.0, fc[n_ls + n_pk:, :]) / fs_tf
-        alpha = tf.sin(w0) / (2 * Q[n_ls + n_pk:, :])
+        A = 10 ** (gain[n_ls+n_pk:, :] / 40)
+        w0 = 2 * np.pi * tf.pow(10.0, fc[n_ls+n_pk:, :]) / fs_tf
+        alpha = tf.sin(w0) / (2 * Q[n_ls+n_pk:, :])
 
         a0_hs = (A + 1) - (A - 1) * tf.cos(w0) + 2 * tf.sqrt(A) * alpha
         a1_hs = -(2 * ((A - 1) - (A + 1) * tf.cos(w0))) / a0_hs
@@ -540,7 +539,7 @@ class FrequencyResponse:
                 if min_loss is None or step_loss < min_loss:
                     # Improvement, update model
                     _eq, _fc, _Q, _gain = sess.run([eq_op, fc, Q, gain])
-                    _fc = 10 ** _fc
+                    _fc = 10**_fc
 
                 if min_loss is None or min_loss - step_loss > threshold:
                     # Loss improved
@@ -666,19 +665,46 @@ class FrequencyResponse:
         filters = np.transpose(np.vstack([fc, Q, gain]))
         return filters, len(fc), np.max(self.fixed_band_eq)
 
-    @staticmethod
-    def write_eqapo_parametric_eq(file_path, filters):
+    def write_eqapo_parametric_eq(self, file_path, filters, preamp=None):
         """Writes EqualizerAPO Parameteric eq settings to a file."""
         file_path = os.path.abspath(file_path)
 
+        if preamp is None:
+            # Calculate preamp from the cascade frequency response
+            fr = np.zeros(self.frequency.shape)
+            for filt in filters:
+                a0, a1, a2, b0, b1, b2 = biquad.peaking(filt[0], filt[1], filt[2], fs=44100)
+                fr += biquad.digital_coeffs(self.frequency, 44100, a0, a1, a2, b0, b1, b2)
+            preamp = np.min([0.0, -(np.max(fr) + PREAMP_HEADROOM)])
+
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(['Filter {i}: ON {type} Fc {fc:.0f} Hz Gain {gain:.1f} dB Q {Q:.2f}'.format(
-                i=i + 1,
-                type='PK',
-                fc=filters[i, 0],
-                Q=filters[i, 1],
-                gain=filters[i, 2]
-            ) for i in range(len(filters))]))
+            s = f'Preamp: {preamp:.1f} dB\n'
+            for i, filt in enumerate(filters):
+                s += f'Filter {i+1}: ON PK Fc {filt[0]:.0f} Hz Gain {filt[2]:.1f} dB Q {filt[1]:.2f}\n'
+            f.write(s)
+
+    def write_rockbox_10_band_fixed_eq(self, file_path, filters, preamp=None):
+        """Writes Rockbox 10 band eq settings to a file."""
+        file_path = os.path.abspath(file_path)
+
+        if preamp is None:
+            # Calculate preamp from the cascade frequency response
+            fr = np.zeros(self.frequency.shape)
+            for filt in filters:
+                a0, a1, a2, b0, b1, b2 = biquad.peaking(filt[0], filt[1], filt[2], fs=44100)
+                fr += biquad.digital_coeffs(self.frequency, 44100, a0, a1, a2, b0, b1, b2)
+            preamp = np.min([0.0, -(np.max(fr) + PREAMP_HEADROOM)])
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            s = f'eq enabled: on\neq precut: {round(abs(preamp), 1) * 10:.0f}\n'
+            for i, filt in enumerate(filters):
+                if i == 0:
+                    s += f'eq low shelf filter: {filt[0]:.0f}, {round(filt[1], 1) * 10:.0f}, {round(filt[2], 1) * 10:.0f}\n'
+                elif i == len(filters) - 1:
+                    s += f'eq high shelf filter: {filt[0]:.0f}, {round(filt[1], 1) * 10:.0f}, {round(filt[2], 1) * 10:.0f}\n'
+                else:
+                    s += f'eq peak filter {i}: {filt[0]:.0f}, {round(filt[1], 1) * 10:.0f}, {round(filt[2], 1) * 10:.0f}\n'
+            f.write(s)
 
     @staticmethod
     def _split_path(path):
@@ -707,7 +733,7 @@ class FrequencyResponse:
         Args:
             fs: Sampling frequency in Hz
             f_res: Frequency resolution as sampling interval. 20 would result in sampling at 0 Hz, 20 Hz, 40 Hz, ...
-            normalize: Normalize gain to -0.5 dB
+            normalize: Normalize gain to -0.2 dB
 
         Returns:
             Minimum phase impulse response
@@ -715,7 +741,7 @@ class FrequencyResponse:
         # Double frequency resolution because it will be halved when converting linear phase IR to minimum phase
         f_res /= 2
         # Interpolate to even sample interval
-        fr = FrequencyResponse(name='fr_data', frequency=self.frequency.copy(), raw=self.equalization.copy())
+        fr = self.__class__(name='fr_data', frequency=self.frequency.copy(), raw=self.equalization.copy())
         # Save gain at lowest available frequency
         f_min = np.max([fr.frequency[0], f_res])
         interpolator = InterpolatedUnivariateSpline(np.log10(fr.frequency), fr.raw, k=1)
@@ -731,15 +757,15 @@ class FrequencyResponse:
         if normalize:
             # Reduce by max gain to avoid clipping with 1 dB of headroom
             fr.raw -= np.max(fr.raw)
-            fr.raw -= 0.5
+            fr.raw -= PREAMP_HEADROOM
         # Minimum phase transformation by scipy's homomorphic method halves dB gain
         fr.raw *= 2
         # Convert amplitude to linear scale
-        fr.raw = 10 ** (fr.raw / 20)
+        fr.raw = 10**(fr.raw / 20)
         # Zero gain at Nyquist frequency
         fr.raw[-1] = 0.0
         # Calculate response
-        ir = firwin2(len(fr.frequency) * 2, fr.frequency, fr.raw, fs=fs)
+        ir = firwin2(len(fr.frequency)*2, fr.frequency, fr.raw, fs=fs)
         # Convert to minimum phase
         ir = minimum_phase(ir, n_fft=len(ir))
         return ir
@@ -747,7 +773,7 @@ class FrequencyResponse:
     def linear_phase_impulse_response(self, fs=DEFAULT_FS, f_res=DEFAULT_F_RES, normalize=True):
         """Generates impulse response implementation of equalization filter."""
         # Interpolate to even sample interval
-        fr = FrequencyResponse(name='fr_data', frequency=self.frequency, raw=self.equalization)
+        fr = self.__class__(name='fr_data', frequency=self.frequency, raw=self.equalization)
         # Save gain at lowest available frequency
         f_min = np.max([fr.frequency[0], f_res])
         interpolator = InterpolatedUnivariateSpline(np.log10(fr.frequency), fr.raw, k=1)
@@ -759,13 +785,13 @@ class FrequencyResponse:
         if normalize:
             # Reduce by max gain to avoid clipping with 1 dB of headroom
             fr.raw -= np.max(fr.raw)
-            fr.raw -= 0.5
+            fr.raw -= PREAMP_HEADROOM
         # Convert amplitude to linear scale
-        fr.raw = 10 ** (fr.raw / 20)
+        fr.raw = 10**(fr.raw / 20)
         # Calculate response
         fr.frequency = np.append(fr.frequency, fs // 2)
         fr.raw = np.append(fr.raw, 0.0)
-        ir = firwin2(len(fr.frequency) * 2, fr.frequency, fr.raw, fs=fs)
+        ir = firwin2(len(fr.frequency)*2, fr.frequency, fr.raw, fs=fs)
         return ir
 
     def write_readme(self, file_path, max_filters=None, max_gains=None):
@@ -782,7 +808,6 @@ class FrequencyResponse:
         # Add parametric EQ settings
         parametric_eq_path = os.path.join(dir_path, model + ' ParametricEQ.txt')
         if os.path.isfile(parametric_eq_path) and self.parametric_eq is not None and len(self.parametric_eq):
-            max_gains = [x + 0.5 for x in max_gains]
 
             # Read Parametric eq
             with open(parametric_eq_path, 'r', encoding='utf-8') as f:
@@ -791,18 +816,18 @@ class FrequencyResponse:
             # Filters as Markdown table
             filters = []
             for line in parametric_eq_str.split('\n'):
-                if line == '':
+                if line == '' or line.split()[0] != 'Filter':
                     continue
-                filter_type = line[line.index('ON') + 3:line.index('Fc') - 1]
+                filter_type = line[line.index('ON')+3:line.index('Fc')-1]
                 if filter_type == 'PK':
                     filter_type = 'Peaking'
                 if filter_type == 'LS':
                     filter_type = 'Low Shelf'
                 if filter_type == 'HS':
                     filter_type = 'High Shelf'
-                fc = line[line.index('Fc') + 3:line.index('Gain') - 1]
-                gain = line[line.index('Gain') + 5:line.index('Q') - 1]
-                q = line[line.index('Q') + 2:]
+                fc = line[line.index('Fc')+3:line.index('Gain')-1]
+                gain = line[line.index('Gain')+5:line.index('Q')-1]
+                q = line[line.index('Q')+2:]
                 filters.append([filter_type, fc, q, gain])
             filters_table_str = tabulate(
                 filters,
@@ -817,38 +842,36 @@ class FrequencyResponse:
                     n.append(n[-1] + x)
                 del n[0]
                 if len(max_filters) > 3:
-                    max_filters_str = ', '.join([str(x) for x in n[:-2]]) + ' or {}'.format(n[-2])
+                    max_filters_str = ', '.join([str(x) for x in n[:-2]]) + f' or {n[-2]}'
                 if len(max_filters) == 3:
-                    max_filters_str = '{n0} or {n1}'.format(n0=n[0], n1=n[1])
+                    max_filters_str = f'{n[0]} or {n[1]}'
                 if len(max_filters) == 2:
                     max_filters_str = str(n[0])
-                max_filters_str = 'The first {} filters can be used independently.'.format(max_filters_str)
+                max_filters_str = f'The first {max_filters_str} filters can be used independently.'
 
             preamp_str = ''
             if type(max_gains) == list and len(max_gains) > 1:
-                max_gains = [x + 0.1 for x in max_gains]
                 if len(max_gains) > 3:
-                    _s = 'When using independent subset of filters, apply preamp of {}, respectively.'
-                    preamp_str = ', '.join(['-{:.1f}dB'.format(x) for x in max_gains[:-2]])
-                    preamp_str += ' or -{:.1f}dB'.format(max_gains[-2])
-                if len(max_gains) == 3:
-                    _s = 'When using independent subset of filters, apply preamp of {}, respectively.'
-                    preamp_str = '-{g0:.1f}dB or -{g1:.1f}dB'.format(g0=max_gains[0], g1=max_gains[1])
-                if len(max_gains) == 2:
-                    _s = 'When using independent subset of filters, apply preamp of **{}**.'
-                    preamp_str = '-{:.1f}dB'.format(max_gains[0])
-                preamp_str = _s.format(preamp_str)
+                    strs = f', '.join([f'{-(x + PREAMP_HEADROOM):.1f} dB' for x in max_gains[:-2]]) + f' or -{max_gains[-2]:.1f} dB'
+                    preamp_str = f'When using independent subset of filters, apply preamp of {strs}, respectively.'
+                elif len(max_gains) == 3:
+                    preamp_str = f'When using independent subset of filters, apply preamp of ' \
+                                 f'{-(max_gains[0] + PREAMP_HEADROOM):.1f} dB ' \
+                                 f'or {-(max_gains[1] + PREAMP_HEADROOM):.1f} dB, respectively.'
+                elif len(max_gains) == 2:
+                    preamp_str = f'When using independent subset of filters, apply preamp of ' \
+                                 f'**{-(max_gains[0] + PREAMP_HEADROOM):.1f} dB**.'
 
             s += '''
             ### Parametric EQs
-            In case of using parametric equalizer, apply preamp of **-{preamp:.1f}dB** and build filters manually
+            In case of using parametric equalizer, apply preamp of **{preamp:.1f}dB** and build filters manually
             with these parameters. {max_filters_str}
             {preamp_str}
 
             {filters_table}
             '''.format(
                 model=model,
-                preamp=max_gains[-1],
+                preamp=-(max_gains[-1] + PREAMP_HEADROOM),
                 max_filters_str=max_filters_str,
                 preamp_str=preamp_str,
                 filters_table=filters_table_str
@@ -857,7 +880,7 @@ class FrequencyResponse:
         # Add fixed band eq
         fixed_band_eq_path = os.path.join(dir_path, model + ' FixedBandEQ.txt')
         if os.path.isfile(fixed_band_eq_path) and self.fixed_band_eq is not None and len(self.fixed_band_eq):
-            preamp = np.min([0.0, float(-np.max(self.fixed_band_eq))]) - 0.5
+            preamp = np.min([0.0, -np.max(self.fixed_band_eq) - PREAMP_HEADROOM])
 
             # Read Parametric eq
             with open(fixed_band_eq_path, 'r', encoding='utf-8') as f:
@@ -866,7 +889,7 @@ class FrequencyResponse:
             # Filters as Markdown table
             filters = []
             for line in fixed_band_eq_str.split('\n'):
-                if line == '':
+                if line == '' or line.split()[0] != 'Filter':
                     continue
                 filter_type = line[line.index('ON') + 3:line.index('Fc') - 1]
                 if filter_type == 'PK':
@@ -973,7 +996,7 @@ class FrequencyResponse:
         Returns:
             Gain shifted
         """
-        equal_energy_fr = FrequencyResponse(name='equal_energy', frequency=self.frequency.copy(), raw=self.raw.copy())
+        equal_energy_fr = self.__class__(name='equal_energy', frequency=self.frequency.copy(), raw=self.raw.copy())
         equal_energy_fr.interpolate()
         interpolator = InterpolatedUnivariateSpline(np.log10(equal_energy_fr.frequency), equal_energy_fr.raw, k=1)
         if type(frequency) in [list, np.ndarray] and len(frequency) > 1:
@@ -1054,7 +1077,7 @@ class FrequencyResponse:
                    min_mean_error=False):
         """Sets target and error curves."""
         # Copy and center compensation data
-        compensation = FrequencyResponse(name='compensation', frequency=compensation.frequency, raw=compensation.raw)
+        compensation = self.__class__(name='compensation', frequency=compensation.frequency, raw=compensation.raw)
         compensation.center()
 
         # Set target
@@ -1150,7 +1173,7 @@ class FrequencyResponse:
         with warnings.catch_warnings():
             # Savgol filter uses array indexing which is not future proof, ignoring the warning and trusting that this
             # will be fixed in the future release
-            warnings.simplefilter("ignore")
+            warnings.simplefilter('ignore')
             for i in range(iterations):
                 y_normal = savgol_filter(y_normal, self._window_size(window_size), 2)
 
@@ -1282,81 +1305,286 @@ class FrequencyResponse:
 
     def equalize(self,
                  max_gain=DEFAULT_MAX_GAIN,
-                 smoothen=True,
+                 limit=18,
+                 limit_decay=0.0,
+                 concha_interference=False,
+                 window_size=1 / 12,
+                 treble_window_size=2,
                  treble_f_lower=DEFAULT_TREBLE_F_LOWER,
                  treble_f_upper=DEFAULT_TREBLE_F_UPPER,
-                 treble_max_gain=DEFAULT_TREBLE_MAX_GAIN,
                  treble_gain_k=DEFAULT_TREBLE_GAIN_K):
         """Creates equalization curve and equalized curve.
 
         Args:
             max_gain: Maximum positive gain in dB
-            smoothen: Smooth kinks caused by clipping gain to max gain?
-            treble_f_lower: Lower frequency boundary for transition region between normal parameters and treble parameters
-            treble_f_upper: Upper frequency boundary for transition reqion between normal parameters and treble parameters
-            treble_max_gain: Maximum positive gain in dB in treble region
-            treble_gain_k: Coefficient for treble gain, positive and negative. Useful for disbling or reducing \
+            limit: Maximum slope in dB per octave
+            limit_decay: Decay coefficient (per octave) for the limit. Value of 0.5 would reduce limit by 50% in an octave
+                when traversing a single limitation zone.
+            concha_interference: Do measurements include concha interference which produced a narrow dip around 9 kHz?
+            window_size: Smoothing window size in octaves.
+            treble_window_size: Smoothing window size in octaves in the treble region.
+            treble_f_lower: Lower boundary of transition frequency region. In the transition region normal filter is \
+                            switched to treble filter with sigmoid weighting function.
+            treble_f_upper: Upper boundary of transition frequency reqion. In the transition region normal filter is \
+                            switched to treble filter with sigmoid weighting function.
+            treble_gain_k: Coefficient for treble gain, positive and negative. Useful for disabling or reducing \
                            equalization power in treble region. Defaults to 1.0 (not limited).
+
+        Returns:
+
         """
-        self.equalization = []
-        self.equalized_raw = []
+        fr = FrequencyResponse(name='fr', frequency=self.frequency, raw=self.error)
+        # Smoothen data heavily in the treble region to avoid problems caused by peakiness
+        fr.smoothen_fractional_octave(
+            window_size=window_size, treble_window_size=treble_window_size, treble_f_lower=treble_f_lower,
+            treble_f_upper=treble_f_upper)
 
-        if len(self.error_smoothed):
-            error = self.error_smoothed
-        elif len(self.error):
-            error = self.error
+        # Copy data
+        x = np.array(fr.frequency)
+        y = np.array(-fr.smoothed)  # Inverse of the smoothed error
+
+        # Find peaks and notches
+        peak_inds, peak_props = find_peaks(y, prominence=1)
+        dip_inds, dip_props = find_peaks(-y, prominence=1)
+
+        if not len(peak_inds) and not len(dip_inds):
+            # No peaks or dips, it's a flat line
+            # Use the inverse error as the equalization target
+            self.equalization = y
+            # Equalized
+            self.equalized_raw = self.raw + self.equalization
+            if len(self.smoothed):
+                self.equalized_smoothed = self.smoothed + self.equalization
+            return y, fr.smoothed.copy(), np.array([]), np.array([False] * len(y)), np.array([]),\
+                np.array([False] * len(y)), np.array([]), np.array([]), len(y) - 1, np.array([False] * len(y))
+
         else:
-            raise ValueError('Error data is missing. Call FrequencyResponse.compensate().')
+            limit_free_mask = self.protection_mask(y, peak_inds, dip_inds)
+            if concha_interference:
+                # 8 kHz - 11.5 kHz should not be limit free zone
+                limit_free_mask[np.logical_and(x >= 8000, x <= 11500)] = False
 
-        if None in error or None in self.equalization or None in self.equalized_raw:
-            # Must not contain None values
-            raise ValueError('None values detected during equalization, interpolating data with default parameters.')
+            # Find rtl start index
+            rtl_start = self.find_rtl_start(y, peak_inds, dip_inds)
 
-        # Invert with max gain clipping
-        previous_clipped = False
-        kink_inds = []
+            # Find ltr and rtl limitations
+            # limited_ltr is y but with slopes limited when traversing left to right
+            # clipped_ltr is boolean mask for limited samples when traversing left to right
+            # limited_rtl is found using ltr algorithm but with flipped data
+            limited_ltr, clipped_ltr, regions_ltr = self.limited_ltr_slope(
+                x, y, limit, limit_decay=limit_decay, start_index=0, peak_inds=peak_inds,
+                limit_free_mask=limit_free_mask, concha_interference=concha_interference)
+            limited_rtl, clipped_rtl, regions_rtl = self.limited_rtl_slope(
+                x, y, limit, limit_decay=limit_decay, start_index=rtl_start, peak_inds=peak_inds,
+                limit_free_mask=limit_free_mask, concha_interference=concha_interference)
 
-        # Max gain at each frequency
-        max_gain = self._sigmoid(treble_f_lower, treble_f_upper, a_normal=max_gain, a_treble=treble_max_gain)
-        gain_k = self._sigmoid(treble_f_lower, treble_f_upper, a_normal=1.0, a_treble=treble_gain_k)
-        for i in range(len(error)):
-            gain = - error[i] * gain_k[i]
-            clipped = gain > max_gain[i]
-            if previous_clipped != clipped:
-                kink_inds.append(i)
-            previous_clipped = clipped
-            if clipped:
-                gain = max_gain[i]
-            self.equalization.append(gain)
+            # ltr and rtl limited curves are combined with min function
+            combined = self.__class__(
+                name='limiter', frequency=x, raw=np.min(np.vstack([limited_ltr, limited_rtl]), axis=0))
 
-        if len(kink_inds) and kink_inds[0] == 0:
-            del kink_inds[0]
+            # Limit treble gain
+            gain_k = self._sigmoid(treble_f_lower, treble_f_upper, a_normal=1.0, a_treble=treble_gain_k)
+            combined.raw *= gain_k
 
-        if smoothen:
-            # Smooth out kinks
-            window_size = self._window_size(1 / 12)
-            doomed_inds = set()
-            for i in kink_inds:
-                start = i - min(i, (window_size - 1) // 2)
-                end = i + 1 + min(len(self.equalization) - i - 1, (window_size - 1) // 2)
-                doomed_inds.update(range(start, end))
-            doomed_inds = sorted(doomed_inds)
+            # Gain can be reduced in the treble region
+            # Clip positive gain to max gain
+            combined.raw = np.min(np.vstack([combined.raw, np.ones(combined.raw.shape) * max_gain]), axis=0)
+            # Smoothen the curve to get rid of hard kinks
+            combined.smoothen_fractional_octave(window_size=1 / 5, treble_window_size=1 / 5)
 
-            for i in range(1, 3):
-                if len(self.frequency) - i in doomed_inds:
-                    del doomed_inds[doomed_inds.index(len(self.frequency) - i)]
+            # TODO: Fix trend by comparing super heavy smoothed equalizer frequency responses: limited vs unlimited
 
-            f = np.array([x for i, x in enumerate(self.frequency) if i not in doomed_inds])
-            e = np.array([x for i, x in enumerate(self.equalization) if i not in doomed_inds])
-            interpolator = InterpolatedUnivariateSpline(np.log10(f), e, k=2)
-            self.equalization = interpolator(np.log10(self.frequency))
-        else:
-            self.equalization = np.array(self.equalization)
+            # Equalization curve
+            self.equalization = combined.smoothed
 
         # Equalized
         self.equalized_raw = self.raw + self.equalization
         if len(self.smoothed):
             self.equalized_smoothed = self.smoothed + self.equalization
+
+        return combined.smoothed.copy(), fr.smoothed.copy(), limited_ltr, clipped_ltr, limited_rtl,\
+            clipped_rtl, peak_inds, dip_inds, rtl_start, limit_free_mask
+
+    @staticmethod
+    def protection_mask(y, peak_inds, dip_inds):
+        """Finds zones around dips which are lower than their adjacent dips.
+
+        Args:
+            y: amplitudes
+            peak_inds: Indices of peaks
+            dip_inds: Indices of dips
+
+        Returns:
+            Boolean mask for limitation-free indices
+        """
+        if len(peak_inds) and (not len(dip_inds) or peak_inds[-1] > dip_inds[-1]):
+            # Last peak is after last dip, add new dip after the last peak at the minimum
+            last_dip_ind = np.argmin(y[peak_inds[-1]:]) + peak_inds[-1]
+            dip_inds = np.concatenate([dip_inds, [last_dip_ind]])
+            dip_levels = y[dip_inds]
+        else:
+            dip_inds = np.concatenate([dip_inds, [-1]])
+            dip_levels = y[dip_inds]
+            dip_levels[-1] = np.min(y)
+
+        mask = np.zeros(len(y)).astype(bool)
+        if len(dip_inds) < 3:
+            return mask
+
+        for i in range(1, len(dip_inds) - 1):
+            dip_ind = dip_inds[i]
+            target_left = dip_levels[i - 1]
+            target_right = dip_levels[i + 1]
+            # TODO: Should target be where gradient reduces below certain threshold?
+            left_ind = np.argwhere(y[:dip_ind] >= target_left)[-1, 0] + 1
+            right_ind = np.argwhere(y[dip_ind:] >= target_right)[0, 0] + dip_ind - 1
+            mask[left_ind:right_ind + 1] = np.ones(right_ind - left_ind + 1).astype(bool)
+        return mask
+
+    @classmethod
+    def limited_rtl_slope(cls, x, y, limit, limit_decay=0.0, start_index=0, peak_inds=None, limit_free_mask=None,
+                          concha_interference=False):
+        """Limits right to left slope of an equalization curve.
+
+            Args:
+                x: frequencies
+                y: amplitudes
+                limit: maximum slope in dB / oct
+                limit_decay: Limit decay coefficient per octave
+                start_index: Index where to start traversing, no limitations apply before this
+                peak_inds: Peak indexes. Regions will require to touch one of these if given.
+                limit_free_mask: Boolean mask for indices where limitation must not be applied
+                concha_interference: Do measurements include concha interference which produced a narrow dip around 9 kHz?
+
+            Returns:
+                limited: Limited curve
+                mask: Boolean mask for clipped indexes
+                regions: Clipped regions, one per row, 1st column is the start index, 2nd column is the end index (exclusive)
+        """
+        start_index = len(x) - start_index - 1
+        if peak_inds is not None:
+            peak_inds = len(x) - peak_inds - 1
+        if limit_free_mask is not None:
+            limit_free_mask = np.flip(limit_free_mask)
+        limited_rtl, clipped_rtl, regions_rtl = cls.limited_ltr_slope(
+            x, np.flip(y), limit, limit_decay=limit_decay, start_index=start_index, peak_inds=peak_inds,
+            limit_free_mask=limit_free_mask, concha_interference=concha_interference)
+        limited_rtl = np.flip(limited_rtl)
+        clipped_rtl = np.flip(clipped_rtl)
+        regions_rtl = len(x) - regions_rtl - 1
+        return limited_rtl, clipped_rtl, regions_rtl
+
+    @classmethod
+    def limited_ltr_slope(cls, x, y, limit, limit_decay=0.0, start_index=0, peak_inds=None, limit_free_mask=None,
+                          concha_interference=False):
+        """Limits left to right slope of a equalization curve.
+
+        Args:
+            x: frequencies
+            y: amplitudes
+            limit: maximum slope in dB / oct
+            limit_decay: Limit decay coefficient per octave
+            start_index: Index where to start traversing, no limitations apply before this
+            peak_inds: Peak indexes. Regions will require to touch one of these if given.
+            limit_free_mask: Boolean mask for indices where limitation must not be applied
+            concha_interference: Do measurements include concha interference which produced a narrow dip around 9 kHz?
+
+        Returns:
+            limited: Limited curve
+            mask: Boolean mask for clipped indexes
+            regions: Clipped regions, one per row, 1st column is the start index, 2nd column is the end index (exclusive)
+        """
+        if peak_inds is not None:
+            peak_inds = np.array(peak_inds)
+
+        limited = []
+        clipped = []
+        regions = []
+        for i in range(len(x)):
+            if i <= start_index:
+                # No clipping before start index
+                limited.append(y[i])
+                clipped.append(False)
+                continue
+
+            # Calculate slope and local limit
+            slope = cls.log_log_gradient(x[i], x[i - 1], y[i], limited[-1])
+            # Local limit is 25% of the limit between 8 kHz and 10 kHz
+            local_limit = limit / 4 if 8000 <= x[i] <= 11500 and concha_interference else limit
+
+            if clipped[-1]:
+                # Previous sample clipped, reduce limit
+                # print(f'{x[i]} -> {x[regions[-1][0]]} = {(1 - limit_decay) ** np.log2(x[i] / x[regions[-1][0]])}')
+                local_limit *= (1 - limit_decay) ** np.log2(x[i] / x[regions[-1][0]])
+
+            if slope > local_limit and (limit_free_mask is None or not limit_free_mask[i]):
+                # Slope between the two samples is greater than the local maximum slope, clip to the max
+                if not clipped[-1]:
+                    # Start of clipped region
+                    regions.append([i])
+                clipped.append(True)
+                # Add value with limited change
+                octaves = np.log(x[i] / x[i - 1]) / np.log(2)
+                limited.append(limited[-1] + local_limit * octaves)
+
+            else:
+                # Moderate slope, no need to limit
+                limited.append(y[i])
+
+                if clipped[-1]:
+                    # Previous sample clipped but this one didn't, means it's the end of clipped region
+                    # Add end index to the region
+                    regions[-1].append(i + 1)
+
+                    region_start = regions[-1][0]
+                    if peak_inds is not None and not np.any(np.logical_and(peak_inds >= region_start, peak_inds < i)):
+                        # None of the peak indices found in the current region, discard limitations
+                        limited[region_start:i] = y[region_start:i]
+                        clipped[region_start:i] = [False] * (i - region_start)
+                        regions.pop()
+                clipped.append(False)
+
+        if len(regions) and len(regions[-1]) == 1:
+            regions[-1].append(len(x) - 1)
+
+        return np.array(limited), np.array(clipped), np.array(regions)
+
+    @staticmethod
+    def log_log_gradient(f0, f1, g0, g1):
+        """Calculates gradient (derivative) in dB per octave."""
+        octaves = np.log(f1 / f0) / np.log(2)
+        gain = g1 - g0
+        return gain / octaves
+
+    @staticmethod
+    def find_rtl_start(y, peak_inds, dip_inds):
+        """Finds start index for right to left equalization curve traverse.
+
+        Args:
+            y: Gain data
+            peak_inds: Indices of peaks in the gain data
+            dip_inds: Indices of dips in the gain data
+
+        Returns:
+            Start index
+        """
+        # Find starting index for the rtl pass
+        if len(peak_inds) and (not len(dip_inds) or peak_inds[-1] > dip_inds[-1]):
+            # Last peak is a positive peak
+            if len(dip_inds):
+                # Find index on the right side of the peak where the curve crosses the last dip level
+                rtl_start = np.argwhere(y[peak_inds[-1]:] <= y[dip_inds[-1]])
+            else:
+                # There are no dips, use the minimum of the first and the last value of y
+                rtl_start = np.argwhere(y[peak_inds[-1]:] <= max(y[0], y[-1]))
+            if len(rtl_start):
+                rtl_start = rtl_start[0, 0] + peak_inds[-1]
+            else:
+                rtl_start = len(y) - 1
+        else:
+            # Last peak is a negative peak, start there
+            rtl_start = dip_inds[-1]
+        return rtl_start
 
     @staticmethod
     def kwarg_defaults(kwargs, **defaults):
@@ -1466,12 +1694,14 @@ class FrequencyResponse:
         ax.semilogx()
         ax.set_xlim([f_min, f_max])
         ax.set_ylabel('Amplitude (dBr)')
-        ax.set_ylim([a_min, a_max])
+        if a_min is not None or a_max is not None:
+            ax.set_ylim([a_min, a_max])
         ax.set_title(self.name)
         ax.legend(fontsize=8)
         ax.grid(True, which='major')
         ax.grid(True, which='minor')
         ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
+        ax.set_xticks([20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000])
         if file_path is not None:
             file_path = os.path.abspath(file_path)
             fig.savefig(file_path, dpi=120)
@@ -1546,11 +1776,13 @@ class FrequencyResponse:
                 tilt=None,
                 sound_signature=None,
                 max_gain=DEFAULT_MAX_GAIN,
+                fs=DEFAULT_FS,
+                concha_interference=False,
+                window_size=1 / 12,
+                treble_window_size=2,
                 treble_f_lower=DEFAULT_TREBLE_F_LOWER,
                 treble_f_upper=DEFAULT_TREBLE_F_UPPER,
-                treble_max_gain=DEFAULT_TREBLE_MAX_GAIN,
-                treble_gain_k=DEFAULT_TREBLE_GAIN_K,
-                fs=DEFAULT_FS):
+                treble_gain_k=DEFAULT_TREBLE_GAIN_K):
         """Runs processing pipeline with interpolation, centering, compensation and equalization.
 
         Args:
@@ -1571,11 +1803,16 @@ class FrequencyResponse:
             tilt: Target frequency response tilt in db / octave
             sound_signature: Sound signature as FrequencyResponse instance. Raw data will be used.
             max_gain: Maximum positive gain in dB
-            treble_f_lower: Lower bound for treble transition region
-            treble_f_upper: Upper boud for treble transition region
-            treble_max_gain: Maximum gain in treble region
-            treble_gain_k: Gain coefficient in treble region
             fs: Sampling frequency
+            concha_interference: Do measurements include concha interference which produced a narrow dip around 9 kHz?
+            window_size: Smoothing window size in octaves.
+            treble_window_size: Smoothing window size in octaves in the treble region.
+            treble_f_lower: Lower boundary of transition frequency region. In the transition region normal filter is
+                            switched to treble filter with sigmoid weighting function.
+            treble_f_upper: Upper boundary of transition frequency region. In the transition region normal filter is
+                            switched to treble filter with sigmoid weighting function.
+            treble_gain_k: Coefficient for treble gain, positive and negative. Useful for disabling or reducing
+                           equalization power in treble region. Defaults to 1.0 (not limited).
 
         Returns:
             - **peq_filters:** Numpy array of produced parametric eq peaking filters. Each row contains Fc, Q and gain
@@ -1632,29 +1869,23 @@ class FrequencyResponse:
             )
 
         # Smooth data
-        self.smoothen_heavy_light()
         self.smoothen_fractional_octave(
-            window_size=1 / 3,
-            treble_window_size=1.4,
-            treble_f_lower=6000,
-            treble_f_upper=12000
+            window_size=1 / 12,
+            treble_window_size=2,
+            treble_f_lower=treble_f_lower,
+            treble_f_upper=treble_f_upper
         )
 
-        peq_filters = n_peq_filters = peq_max_gains = fbeq_filters = n_fbeq_filters = nfbeq_max_gains = None
+        peq_filters = n_peq_filters = peq_max_gains = fbeq_filters = n_fbeq_filters = fbeq_max_gains = None
         # Equalize
         if equalize:
             self.equalize(
-                max_gain=max_gain,
-                smoothen=True,
-                treble_f_lower=treble_f_lower,
-                treble_f_upper=treble_f_upper,
-                treble_max_gain=treble_max_gain,
-                treble_gain_k=treble_gain_k
-            )
+                max_gain=max_gain, concha_interference=concha_interference, treble_f_lower=treble_f_lower,
+                treble_f_upper=treble_f_upper, treble_gain_k=treble_gain_k)
             if parametric_eq:
                 # Get the filters
                 peq_filters, n_peq_filters, peq_max_gains = self.optimize_parametric_eq(max_filters=max_filters, fs=fs)
             if fixed_band_eq:
-                fbeq_filters, n_fbeq_filters, nfbeq_max_gains = self.optimize_fixed_band_eq(fc=fc, q=q, fs=fs)
+                fbeq_filters, n_fbeq_filters, fbeq_max_gains = self.optimize_fixed_band_eq(fc=fc, q=q, fs=fs)
 
-        return peq_filters, n_peq_filters, peq_max_gains, fbeq_filters, n_fbeq_filters, nfbeq_max_gains
+        return peq_filters, n_peq_filters, peq_max_gains, fbeq_filters, n_fbeq_filters, fbeq_max_gains
