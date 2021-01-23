@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.0.1 - 2021-01-23
+Downgraded scipy version to ~=1.5.4
+
 ## 2.0.0 - 2021-01-17
 Removed `treble_max_gain`. Limited slope equalization algorithm. Updated dependency versions.
 
