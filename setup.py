@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name='autoeq',
-    version='1.2.4',
+    version='1.2.5',
     author='Jaakko Pasanen',
     packages=['autoeq'],
     scripts=[],
@@ -15,11 +15,11 @@ setup(
     keywords=['headphones', 'equalization'],
     install_requires=[
         'Pillow~=7.2.0',
-        'matplotlib~=3.1.1',
-        'pandas~=0.25.1',
-        'scipy~=1.3.1',
-        'numpy~=1.17.2',
-        'tensorflow~=2.0.0',
+        'matplotlib~=3.3.3',
+        'pandas~=1.2.0',
+        'scipy~=1.5.4',
+        'numpy~=1.19.5',
+        'tensorflow~=2.4.0',
         'tabulate~=0.8.5',
         'soundfile~=0.10.2'
     ]
